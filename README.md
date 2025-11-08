@@ -2,8 +2,6 @@
 
 A collection of production-ready n8nQuant workflows specifically designed for quantitative finance applications. Each workflow is fully documented, tested, and includes comprehensive error handling, monitoring, and integration capabilities.
 
-**Note:** If n8nQuant workflow saves you time and makes your quant development more efficient, please give a star on GitHub. It helps more developers discover this project!
-
 ## 📋 Workflow Catalog
 
 | # | Workflow Name | Category | Description | Directory |
@@ -515,5 +513,6 @@ For workflow customization, implementation support, or questions:
 This collection of workflows is provided for educational and professional use. Please ensure compliance with data provider licenses and regulatory requirements when deploying in production environments.
 
 ---
+**Note:** If n8nQuant workflow saves you time and makes your quant development more efficient, please give a star on GitHub. It helps more developers discover this project!
 
 **Note:** Always test workflows thoroughly in a development environment before deploying to production. Monitor performance and adjust configurations based on your specific requirements and data volumes.
