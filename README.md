@@ -4,8 +4,51 @@ A collection of production-ready n8nQuant workflows specifically designed for qu
 
 ## 📋 Workflow Catalog
 
-| # | Workflow Name | Category | Description | Directory |
-|---|---------------|----------|-------------|-----------|
+
+### Market Data
+
+| # | Workflow | Description | Documentation |
+|---|----------|-------------|----------------|
+| 1 | Real-Time Market Data Pipeline | Fetches real-time market data from multiple sources, validates, and stores in database with error handling and monitoring | [View Documentation](Real-Time Market Data Pipeline/README.md) |
+|
+### Other
+
+| # | Workflow | Description | Documentation |
+|---|----------|-------------|----------------|
+| 2 | Automated Backtesting Engine | Comprehensive backtesting framework for quantitative strategies with performance metrics and walk-forward analysis | [View Documentation](Automated Backtesting Engine/README.md) |
+| 3 | Best Execution Monitor | Monitors trade execution quality, calculates slippage, and ensures compliance with best execution obligations | [View Documentation](Best Execution Monitor/README.md) |
+| 4 | Corporate Actions Processor | Automates processing of corporate actions including dividends, stock splits, mergers, and spin-offs with position updates and cash reconciliation | [View Documentation](Corporate Actions Processor/README.md) |
+| 5 | Corporate Bond Pricing Engine | Real-time corporate bond pricing engine with credit risk adjustment and liquidity factors | [View Documentation](Corporate Bond Pricing Engine/README.md) |
+| 6 | FX Exposure Hedger | Automates foreign exchange exposure monitoring, hedge ratio calculation, and execution of hedging strategies with real-time FX rate monitoring | [View Documentation](FX Exposure Hedger/README.md) |
+| 7 | Factor Model Data Aggregator | Aggregates and processes multi-source data for quantitative factor models including fundamental, macroeconomic, and technical factors | [View Documentation](Factor Model Data Aggregator/README.md) |
+| 8 | Margin Call Processor | Automates margin call processing, liquidation prioritization, and collateral management | [View Documentation](Margin Call Processor/README.md) |
+| 9 | Performance Attribution System | Calculates performance attribution by factors, sectors, and other dimensions to understand portfolio returns | [View Documentation](Performance Attribution System/README.md) |
+| 10 | Portfolio Reconciliation System | Automates daily portfolio reconciliation between internal systems and prime brokers, identifies breaks, and initiates resolution workflows | [View Documentation](Portfolio Reconciliation System/README.md) |
+| 11 | Quant Strategy Deployment Pipeline | Automated CI/CD pipeline for quantitative strategies with testing, validation, and deployment | [View Documentation](Quant Strategy Deployment Pipeline/README.md) |
+| 12 | Real-time P&L Calculator | Real-time P&L calculation engine that processes market price updates and calculates position valuations | [View Documentation](Real-time P&L Calculator/README.md) |
+| 13 | Research Data Pipeline | ETL pipeline for financial research data including news, sentiment, and alternative data sources | [View Documentation](Research Data Pipeline/README.md) |
+| 14 | Stress Testing Framework | Executes comprehensive stress tests using multiple historical and hypothetical scenarios to assess portfolio resilience | [View Documentation](Stress Testing Framework/README.md) |
+| 15 | Volatility Surface Builder | Builds and maintains real-time volatility surfaces for options pricing, risk management, and trading strategies | [View Documentation](Volatility Surface Builder/README.md) |
+|
+### Reporting
+
+| # | Workflow | Description | Documentation |
+|---|----------|-------------|----------------|
+| 16 | Regulatory Reporting Automation | Automates MiFID II transaction reporting with validation, formatting, submission, and compliance monitoring | [View Documentation](Regulatory Reporting Automation/README.md) |
+|
+### Risk Management
+
+| # | Workflow | Description | Documentation |
+|---|----------|-------------|----------------|
+| 17 | Counterparty Risk Monitor | Monitors counterparty exposures, calculates CVA, and alerts on deteriorating credit conditions | [View Documentation](Counterparty Risk Monitor/README.md) |
+| 18 | Liquidity Risk Dashboard | Monitors real-time liquidity metrics, bid-ask spreads, and market depth with alerts for deteriorating liquidity conditions | [View Documentation](Liquidity Risk Dashboard/README.md) |
+| 19 | Portfolio Risk Monitor | Calculates Value at Risk (VaR) for portfolios using historical simulation, monitors breaches, and alerts risk team | [View Documentation](Portfolio Risk Monitor/README.md) |
+|
+### Trading
+
+| # | Workflow | Description | Documentation |
+|---|----------|-------------|----------------|
+| 20 | Algorithmic Trading Signal Generator | Generates real-time trading signals using multiple quantitative strategies and routes them to execution systems with risk checks | [View Documentation](Algorithmic Trading Signal Generator/README.md) |
 
 ## 🚀 Quick Start Guide
 
