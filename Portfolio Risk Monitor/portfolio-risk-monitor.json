@@ -1,0 +1,237 @@
+{
+  "name": "Portfolio Risk Monitor - VaR Calculator",
+  "version": 1,
+  "tags": ["risk-management", "var", "portfolio", "compliance"],
+  "description": "Calculates Value at Risk (VaR) for portfolios using historical simulation, monitors breaches, and alerts risk team",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            60
+          ],
+          "hour": [
+            "9-17"
+          ],
+          "minute": [
+            "0,30"
+          ]
+        }
+      },
+      "id": "hourly-risk-trigger",
+      "name": "Hourly Risk Calculation Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    p.portfolio_id,\n    p.portfolio_name,\n    pos.symbol,\n    pos.quantity,\n    pos.average_cost,\n    r.var_limit\nFROM portfolios p\nJOIN positions pos ON p.portfolio_id = pos.portfolio_id\nJOIN risk_limits r ON p.portfolio_id = r.portfolio_id\nWHERE p.active = true\nAND pos.quantity != 0",
+        "additionalFields": {}
+      },
+      "id": "fetch-portfolio-data",
+      "name": "Fetch Active Portfolio Positions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    symbol,\n    date,\n    close_price,\n    LAG(close_price, 1) OVER (PARTITION BY symbol ORDER BY date) as prev_close\nFROM historical_prices \nWHERE symbol IN (SELECT DISTINCT symbol FROM positions WHERE quantity != 0)\nAND date >= CURRENT_DATE - INTERVAL '252 days'\nORDER BY symbol, date",
+        "additionalFields": {}
+      },
+      "id": "fetch-historical-prices",
+      "name": "Fetch 1-Year Historical Prices",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// VaR Calculation using Historical Simulation\nconst calculateVaR = (positions, historicalReturns, confidenceLevel = 0.95) => {\n  const portfolioReturns = [];\n  \n  // Calculate daily portfolio returns for historical period\n  for (let i = 1; i < historicalReturns[0].returns.length; i++) {\n    let dailyPnL = 0;\n    \n    positions.forEach(position => {\n      const symbolReturns = historicalReturns.find(hr => hr.symbol === position.symbol);\n      if (symbolReturns && symbolReturns.returns[i]) {\n        dailyPnL += position.market_value * symbolReturns.returns[i];\n      }\n    });\n    \n    portfolioReturns.push(dailyPnL);\n  }\n  \n  // Sort returns and find VaR at confidence level\n  portfolioReturns.sort((a, b) => a - b);\n  const varIndex = Math.floor(portfolioReturns.length * (1 - confidenceLevel));\n  const var95 = portfolioReturns[varIndex];\n  \n  return {\n    var_95: Math.abs(var95),\n    confidence_level: confidenceLevel,\n    lookback_period: '252 days',\n    calculation_method: 'historical_simulation',\n    calculation_timestamp: new Date().toISOString()\n  };\n};\n\n// Process inputs\nconst positions = items[0].json;\nconst historicalData = items[1].json;\n\n// Group historical data by symbol and calculate returns\nconst historicalReturns = [];\nconst symbols = [...new Set(historicalData.map(h => h.symbol))];\n\nsymbols.forEach(symbol => {\n  const symbolData = historicalData.filter(h => h.symbol === symbol).sort((a, b) => new Date(a.date) - new Date(b.date));\n  const returns = [];\n  \n  for (let i = 1; i < symbolData.length; i++) {\n    if (symbolData[i].prev_close && symbolData[i].prev_close > 0) {\n      returns.push((symbolData[i].close_price - symbolData[i].prev_close) / symbolData[i].prev_close);\n    }\n  }\n  \n  historicalReturns.push({\n    symbol: symbol,\n    returns: returns\n  });\n});\n\n// Add market value to positions\nconst currentPrices = {}; // This would come from real-time data\npositions.forEach(position => {\n  position.market_value = position.quantity * (currentPrices[position.symbol] || position.average_cost);\n});\n\n// Calculate VaR\nconst varResult = calculateVaR(positions, historicalReturns);\n\nreturn [{ json: varResult }];"
+      },
+      "id": "calculate-var",
+      "name": "Calculate Value at Risk (Historical Simulation)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "risk_calculations",
+        "columns": {
+          "portfolio_id": "={{ $json.portfolio_id }}",
+          "var_95": "={{ $json.var_95 }}",
+          "confidence_level": "={{ $json.confidence_level }}",
+          "calculation_method": "={{ $json.calculation_method }}",
+          "lookback_period": "={{ $json.lookback_period }}",
+          "calculation_timestamp": "={{ $json.calculation_timestamp }}",
+          "breach_status": "={{ $json.var_95 > $json.var_limit ? 'BREACH' : 'WITHIN_LIMITS' }}"
+        },
+        "additionalFields": {}
+      },
+      "id": "store-var-results",
+      "name": "Store VaR Results with Breach Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-var-breach",
+              "leftValue": "={{ $json.var_95 }}",
+              "rightValue": "={{ $json.var_limit }}",
+              "operator": {
+                "type": "number",
+                "operation": "greaterThan"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-var-breach",
+      "name": "Check VaR Limit Breach",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1080,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $vars.SLACK_RISK_CHANNEL }}",
+        "text": "🔴 VAR LIMIT BREACH DETECTED\n• Portfolio: {{ $json.portfolio_name }}\n• Current VaR: ${{ $json.var_95.toLocaleString() }}\n• VaR Limit: ${{ $json.var_limit.toLocaleString() }}\n• Breach Amount: ${{ ($json.var_95 - $json.var_limit).toLocaleString() }}\n• Time: {{ $json.calculation_timestamp }}\n• Required Action: Review positions immediately",
+        "additionalFields": {}
+      },
+      "id": "send-var-breach-alert",
+      "name": "Send VaR Breach Alert to Risk Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        1280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "Daily Risk Report - {{ $now }}",
+        "body": "Portfolio Risk Summary:\n\n{{ $json.map(item => `Portfolio: ${item.portfolio_name}\\nVaR (95%): $${item.var_95.toLocaleString()}\\nLimit: $${item.var_limit.toLocaleString()}\\nStatus: ${item.var_95 > item.var_limit ? 'BREACH' : 'OK'}\\n\\n`).join('') }}\n\nGenerated: {{ new Date().toISOString() }}",
+        "to": "={{ $vars.RISK_TEAM_EMAIL }}",
+        "additionalFields": {}
+      },
+      "id": "send-daily-risk-report",
+      "name": "Email Daily Risk Summary",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 1,
+      "position": [
+        1080,
+        500
+      ]
+    }
+  ],
+  "connections": {
+    "Hourly Risk Calculation Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Active Portfolio Positions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Active Portfolio Positions": {
+      "main": [
+        [
+          {
+            "node": "Calculate Value at Risk (Historical Simulation)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Historical Prices": {
+      "main": [
+        [
+          {
+            "node": "Calculate Value at Risk (Historical Simulation)",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Calculate Value at Risk (Historical Simulation)": {
+      "main": [
+        [
+          {
+            "node": "Store VaR Results with Breach Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store VaR Results with Breach Status": {
+      "main": [
+        [
+          {
+            "node": "Check VaR Limit Breach",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Daily Risk Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check VaR Limit Breach": {
+      "main": [
+        [
+          {
+            "node": "Send VaR Breach Alert to Risk Team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

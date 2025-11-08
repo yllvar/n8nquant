@@ -1,0 +1,235 @@
+{
+  "name": "Real-Time Liquidity Risk Dashboard",
+  "version": 1,
+  "tags": ["liquidity", "risk", "real-time", "monitoring"],
+  "description": "Monitors real-time liquidity metrics, bid-ask spreads, and market depth with alerts for deteriorating liquidity conditions",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            1
+          ],
+          "hour": [
+            "*"
+          ],
+          "minute": [
+            "*"
+          ]
+        }
+      },
+      "id": "real-time-trigger",
+      "name": "Real-Time Monitoring Trigger (1-min)",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    symbol,\n    bid_price,\n    ask_price,\n    last_price,\n    volume,\n    spread_percentage,\n    market_depth_bid,\n    market_depth_ask,\n    update_timestamp\nFROM market_data_real_time \nWHERE update_timestamp >= NOW() - INTERVAL '5 minutes'\nAND symbol IN (SELECT symbol FROM portfolio_positions WHERE quantity != 0)",
+        "additionalFields": {}
+      },
+      "id": "fetch-real-time-liquidity",
+      "name": "Fetch Real-Time Liquidity Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Calculate liquidity risk metrics\nconst calculateLiquidityMetrics = (liquidityData) => {\n  const metricsBySymbol = {};\n  \n  liquidityData.forEach(item => {\n    const symbol = item.symbol;\n    \n    if (!metricsBySymbol[symbol]) {\n      metricsBySymbol[symbol] = {\n        symbol: symbol,\n        spreads: [],\n        depths: [],\n        volumes: []\n      };\n    }\n    \n    metricsBySymbol[symbol].spreads.push(item.spread_percentage);\n    metricsBySymbol[symbol].depths.push((item.market_depth_bid + item.market_depth_ask) / 2);\n    metricsBySymbol[symbol].volumes.push(item.volume);\n  });\n  \n  const liquidityMetrics = [];\n  \n  Object.values(metricsBySymbol).forEach(symbolData => {\n    const avgSpread = symbolData.spreads.reduce((a, b) => a + b, 0) / symbolData.spreads.length;\n    const maxSpread = Math.max(...symbolData.spreads);\n    const avgDepth = symbolData.depths.reduce((a, b) => a + b, 0) / symbolData.depths.length;\n    const volumeTrend = symbolData.volumes[symbolData.volumes.length - 1] / symbolData.volumes[0];\n    \n    // Liquidity score calculation (0-100, higher is better)\n    const spreadScore = Math.max(0, 100 - (avgSpread * 1000));\n    const depthScore = Math.min(100, (avgDepth / 100000) * 100);\n    const volumeScore = volumeTrend > 1 ? 100 : volumeTrend * 100;\n    \n    const liquidityScore = (spreadScore * 0.4) + (depthScore * 0.4) + (volumeScore * 0.2);\n    \n    liquidityMetrics.push({\n      symbol: symbolData.symbol,\n      liquidity_score: liquidityScore,\n      average_spread_bps: avgSpread * 10000,\n      max_spread_bps: maxSpread * 10000,\n      average_market_depth: avgDepth,\n      volume_trend: volumeTrend,\n      liquidity_rating: liquidityScore >= 80 ? 'EXCELLENT' : \n                       liquidityScore >= 60 ? 'GOOD' : \n                       liquidityScore >= 40 ? 'FAIR' : \n                       liquidityScore >= 20 ? 'POOR' : 'CRITICAL',\n      calculation_timestamp: new Date().toISOString(),\n      monitoring_period: '5 minutes'\n    });\n  });\n  \n  return liquidityMetrics;\n};\n\nconst metrics = calculateLiquidityMetrics(items.map(item => item.json));\nreturn metrics.map(metric => ({ json: metric }));"
+      },
+      "id": "calculate-liquidity-metrics",
+      "name": "Calculate Liquidity Risk Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-critical-liquidity",
+              "leftValue": "={{ $json.liquidity_score }}",
+              "rightValue": 20,
+              "operator": {
+                "type": "number",
+                "operation": "lessThan"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-liquidity-alerts",
+      "name": "Check Critical Liquidity Conditions",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $vars.SLACK_RISK_CHANNEL }}",
+        "text": "🔴 CRITICAL LIQUIDITY ALERT\n• Symbol: {{ $json.symbol }}\n• Liquidity Score: {{ $json.liquidity_score.toFixed(1) }}/100\n• Rating: {{ $json.liquidity_rating }}\n• Avg Spread: {{ $json.average_spread_bps.toFixed(1) }} bps\n• Market Depth: {{ $json.average_market_depth.toLocaleString() }}\n• Time: {{ $json.calculation_timestamp }}\n• Action: Consider reducing position or hedging",
+        "additionalFields": {}
+      },
+      "id": "send-liquidity-alert",
+      "name": "Send Critical Liquidity Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "table": "liquidity_monitoring",
+        "columns": {
+          "symbol": "={{ $json.symbol }}",
+          "liquidity_score": "={{ $json.liquidity_score }}",
+          "liquidity_rating": "={{ $json.liquidity_rating }}",
+          "average_spread_bps": "={{ $json.average_spread_bps }}",
+          "average_market_depth": "={{ $json.average_market_depth }}",
+          "volume_trend": "={{ $json.volume_trend }}",
+          "calculation_timestamp": "={{ $json.calculation_timestamp }}",
+          "monitoring_period": "={{ $json.monitoring_period }}"
+        },
+        "additionalFields": {
+          "updateKey": "symbol"
+        }
+      },
+      "id": "store-liquidity-metrics",
+      "name": "Store Liquidity Metrics History",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        900,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Calculate portfolio-level liquidity risk\nconst calculatePortfolioLiquidity = (liquidityMetrics, portfolioData) => {\n  let weightedLiquidityScore = 0;\n  let totalMarketValue = 0;\n  \n  portfolioData.forEach(position => {\n    const liquidity = liquidityMetrics.find(l => l.symbol === position.symbol);\n    if (liquidity) {\n      const marketValue = position.quantity * position.last_price;\n      weightedLiquidityScore += liquidity.liquidity_score * marketValue;\n      totalMarketValue += marketValue;\n    }\n  });\n  \n  const portfolioLiquidityScore = totalMarketValue > 0 ? weightedLiquidityScore / totalMarketValue : 0;\n  \n  return {\n    portfolio_liquidity_score: portfolioLiquidityScore,\n    portfolio_liquidity_rating: portfolioLiquidityScore >= 80 ? 'EXCELLENT' : \n                               portfolioLiquidityScore >= 60 ? 'GOOD' : \n                               portfolioLiquidityScore >= 40 ? 'FAIR' : \n                               portfolioLiquidityScore >= 20 ? 'POOR' : 'CRITICAL',\n    total_portfolio_value: totalMarketValue,\n    monitored_symbols: liquidityMetrics.length,\n    calculation_timestamp: new Date().toISOString()\n  };\n};\n\nconst liquidityMetrics = items[0].json;\n// This would typically come from another database query\nconst portfolioData = []; \n\nconst portfolioLiquidity = calculatePortfolioLiquidity(liquidityMetrics, portfolioData);\n\nreturn [{ json: portfolioLiquidity }];"
+      },
+      "id": "calculate-portfolio-liquidity",
+      "name": "Calculate Portfolio-Level Liquidity",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "Liquidity Risk Dashboard - {{ $now }}",
+        "body": "Real-Time Liquidity Risk Summary:\n\nPortfolio Liquidity Overview:\n• Portfolio Liquidity Score: {{ $json.portfolio_liquidity_score.toFixed(1) }}/100\n• Portfolio Rating: {{ $json.portfolio_liquidity_rating }}\n• Total Portfolio Value: ${{ $json.total_portfolio_value.toLocaleString() }}\n• Monitored Symbols: {{ $json.monitored_symbols }}\n\nIndividual Symbol Highlights:\n{{ items.slice(0, 5).map(item => `• ${item.json.symbol}: ${item.json.liquidity_rating} (${item.json.liquidity_score.toFixed(1)}/100)`).join('\\n') }}\n\nGenerated: {{ $json.calculation_timestamp }}",
+        "to": "={{ $vars.RISK_TEAM_EMAIL }}",
+        "additionalFields": {}
+      },
+      "id": "email-liquidity-dashboard",
+      "name": "Email Liquidity Risk Dashboard",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        500
+      ]
+    }
+  ],
+  "connections": {
+    "Real-Time Monitoring Trigger (1-min)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Real-Time Liquidity Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Real-Time Liquidity Data": {
+      "main": [
+        [
+          {
+            "node": "Calculate Liquidity Risk Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Liquidity Risk Metrics": {
+      "main": [
+        [
+          {
+            "node": "Check Critical Liquidity Conditions",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Store Liquidity Metrics History",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Calculate Portfolio-Level Liquidity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Critical Liquidity Conditions": {
+      "main": [
+        [
+          {
+            "node": "Send Critical Liquidity Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Portfolio-Level Liquidity": {
+      "main": [
+        [
+          {
+            "node": "Email Liquidity Risk Dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,238 @@
+{
+  "name": "Best Execution Monitoring System",
+  "version": 1,
+  "tags": ["best-execution", "compliance", "tca", "slippage", "execution-quality"],
+  "description": "Monitors trade execution quality, calculates slippage, and ensures compliance with best execution obligations",
+  "nodes": [
+    {
+      "parameters": {
+        "events": [
+          "trade-execution"
+        ],
+        "path": "trade-execution-webhook",
+        "options": {
+          "responseMode": "lastNode"
+        }
+      },
+      "id": "trade-execution-webhook",
+      "name": "Trade Execution Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ],
+      "webhookId": "best-execution-monitor"
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    symbol,\n    AVG(price) as benchmark_price,\n    AVG(volume) as benchmark_volume,\n    MAX(high_price) as benchmark_high,\n    MIN(low_price) as benchmark_low\nFROM market_data \nWHERE symbol = '{{ $json.symbol }}'\nAND timestamp BETWEEN '{{ $json.execution_timestamp }}' - INTERVAL '5 minutes' AND '{{ $json.execution_timestamp }}' + INTERVAL '5 minutes'\nGROUP BY symbol",
+        "additionalFields": {}
+      },
+      "id": "fetch-benchmark-data",
+      "name": "Fetch Benchmark Price Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Calculate execution quality metrics\nconst calculateExecutionQuality = (trade, benchmark) => {\n  const executionPrice = trade.price;\n  const benchmarkPrice = benchmark.benchmark_price;\n  const quantity = trade.quantity;\n  \n  // Calculate slippage\n  const slippage = trade.side === 'BUY' \n    ? executionPrice - benchmarkPrice \n    : benchmarkPrice - executionPrice;\n  \n  const slippagePercentage = (Math.abs(slippage) / benchmarkPrice) * 100;\n  \n  // Calculate cost metrics\n  const executionCost = slippage * quantity;\n  \n  // Determine execution quality rating\n  let qualityRating = 'POOR';\n  if (slippagePercentage < 0.01) qualityRating = 'EXCELLENT';\n  else if (slippagePercentage < 0.05) qualityRating = 'GOOD';\n  else if (slippagePercentage < 0.1) qualityRating = 'FAIR';\n  \n  return {\n    trade_id: trade.trade_id,\n    symbol: trade.symbol,\n    side: trade.side,\n    quantity: quantity,\n    execution_price: executionPrice,\n    benchmark_price: benchmarkPrice,\n    slippage: slippage,\n    slippage_percentage: slippagePercentage,\n    execution_cost: executionCost,\n    quality_rating: qualityRating,\n    calculation_timestamp: new Date().toISOString(),\n    execution_timestamp: trade.execution_timestamp\n  };\n};\n\nconst trade = $json;\nconst benchmark = items[0].json[0]; // Assuming one benchmark result\nconst executionQuality = calculateExecutionQuality(trade, benchmark);\nreturn [{ json: executionQuality }];"
+      },
+      "id": "calculate-execution-quality",
+      "name": "Calculate Execution Quality Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "execution_quality",
+        "columns": {
+          "trade_id": "={{ $json.trade_id }}",
+          "symbol": "={{ $json.symbol }}",
+          "side": "={{ $json.side }}",
+          "quantity": "={{ $json.quantity }}",
+          "execution_price": "={{ $json.execution_price }}",
+          "benchmark_price": "={{ $json.benchmark_price }}",
+          "slippage": "={{ $json.slippage }}",
+          "slippage_percentage": "={{ $json.slippage_percentage }}",
+          "execution_cost": "={{ $json.execution_cost }}",
+          "quality_rating": "={{ $json.quality_rating }}",
+          "execution_timestamp": "={{ $json.execution_timestamp }}",
+          "calculation_timestamp": "={{ $json.calculation_timestamp }}"
+        },
+        "additionalFields": {}
+      },
+      "id": "store-execution-quality",
+      "name": "Store Execution Quality Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-poor-execution",
+              "leftValue": "={{ $json.quality_rating }}",
+              "rightValue": "POOR",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-execution-quality",
+      "name": "Check Execution Quality Rating",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $vars.SLACK_COMPLIANCE_CHANNEL }}",
+        "text": "⚠️ POOR EXECUTION QUALITY ALERT\n• Trade ID: {{ $json.trade_id }}\n• Symbol: {{ $json.symbol }}\n• Side: {{ $json.side }}\n• Slippage: {{ $json.slippage_percentage.toFixed(2) }}%\n• Execution Cost: ${{ $json.execution_cost.toLocaleString() }}\n• Time: {{ $json.execution_timestamp }}\n• Action Required: Review execution venue",
+        "additionalFields": {}
+      },
+      "id": "send-execution-alert",
+      "name": "Send Poor Execution Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate daily execution quality summary\nconst generateSummary = (executionData) => {\n  const totalTrades = executionData.length;\n  const poorExecutionCount = executionData.filter(item => item.json.quality_rating === 'POOR').length;\n  const avgSlippage = executionData.reduce((sum, item) => sum + item.json.slippage_percentage, 0) / totalTrades;\n  const totalExecutionCost = executionData.reduce((sum, item) => sum + item.json.execution_cost, 0);\n  \n  return {\n    date: new Date().toISOString().split('T')[0],\n    total_executions: totalTrades,\n    poor_execution_count: poorExecutionCount,\n    poor_execution_percentage: (poorExecutionCount / totalTrades) * 100,\n    average_slippage_bps: avgSlippage * 100,\n    total_execution_cost: totalExecutionCost,\n    summary_timestamp: new Date().toISOString()\n  };\n};\n\nconst summary = generateSummary(items);\nreturn [{ json: summary }];"
+      },
+      "id": "generate-execution-summary",
+      "name": "Generate Execution Quality Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "Daily Best Execution Report - {{ $json.date }}",
+        "body": "Execution Quality Summary:\n• Total Executions: {{ $json.total_executions }}\n• Poor Execution Count: {{ $json.poor_execution_count }}\n• Poor Execution Rate: {{ $json.poor_execution_percentage.toFixed(2) }}%\n• Average Slippage: {{ $json.average_slippage_bps.toFixed(2) }} bps\n• Total Execution Cost: ${{ $json.total_execution_cost.toLocaleString() }}\n\nGenerated: {{ $json.summary_timestamp }}",
+        "to": "={{ $vars.COMPLIANCE_TEAM_EMAIL }}",
+        "additionalFields": {}
+      },
+      "id": "email-execution-report",
+      "name": "Email Execution Quality Report",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Trade Execution Webhook": {
+      "main": [
+        [
+          {
+            "node": "Fetch Benchmark Price Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Benchmark Price Data": {
+      "main": [
+        [
+          {
+            "node": "Calculate Execution Quality Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Execution Quality Metrics": {
+      "main": [
+        [
+          {
+            "node": "Store Execution Quality Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Execution Quality Data": {
+      "main": [
+        [
+          {
+            "node": "Check Execution Quality Rating",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Execution Quality Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Execution Quality Rating": {
+      "main": [
+        [
+          {
+            "node": "Send Poor Execution Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Execution Quality Summary": {
+      "main": [
+        [
+          {
+            "node": "Email Execution Quality Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

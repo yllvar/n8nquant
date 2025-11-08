@@ -1,0 +1,185 @@
+{
+  "name": "Quantitative Strategy Backtesting Engine",
+  "version": 1,
+  "tags": ["backtesting", "strategy", "performance", "research"],
+  "description": "Comprehensive backtesting framework for quantitative strategies with performance metrics and walk-forward analysis",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual-backtest-trigger",
+      "name": "Manual Backtest Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Strategy configuration\nconst strategies = [\n  {\n    strategy_id: 'momentum_1m',\n    name: '1-Month Momentum',\n    lookback_period: 21,\n    holding_period: 21,\n    universe: ['SPY', 'QQQ', 'IWM', 'EEM', 'VGK']\n  },\n  {\n    strategy_id: 'mean_reversion_5d',\n    name: '5-Day Mean Reversion',\n    lookback_period: 5,\n    holding_period: 5,\n    universe: ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']\n  }\n];\n\nreturn strategies.map(strategy => ({ json: strategy }));"
+      },
+      "id": "load-strategy-config",
+      "name": "Load Strategy Configurations",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT symbol, date, open, high, low, close, volume\nFROM historical_prices \nWHERE symbol IN (SELECT UNNEST($1::text[]))\nAND date BETWEEN $2 AND $3\nORDER BY symbol, date",
+        "additionalFields": {
+          "queryParams": "={{ [\n  $json.universe,\n  '2018-01-01',\n  '2023-12-31'\n] }}"
+        }
+      },
+      "id": "fetch-historical-data",
+      "name": "Fetch Historical Price Data for Universe",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Backtesting engine core logic\nconst backtestStrategy = (strategy, priceData) => {\n  const signals = [];\n  const trades = [];\n  let currentPosition = null;\n  \n  // Group data by symbol\n  const dataBySymbol = {};\n  priceData.forEach(row => {\n    if (!dataBySymbol[row.symbol]) {\n      dataBySymbol[row.symbol] = [];\n    }\n    dataBySymbol[row.symbol].push({\n      date: new Date(row.date),\n      close: parseFloat(row.close),\n      volume: parseInt(row.volume)\n    });\n  });\n  \n  // Generate signals and execute trades\n  Object.keys(dataBySymbol).forEach(symbol => {\n    const symbolData = dataBySymbol[symbol].sort((a, b) => a.date - b.date);\n    \n    for (let i = strategy.lookback_period; i < symbolData.length; i++) {\n      const currentDate = symbolData[i].date;\n      const lookbackData = symbolData.slice(i - strategy.lookback_period, i);\n      \n      // Momentum strategy logic\n      if (strategy.strategy_id === 'momentum_1m') {\n        const returns = lookbackData.map(d => d.close);\n        const momentum = (returns[returns.length - 1] - returns[0]) / returns[0];\n        \n        if (momentum > 0.05 && !currentPosition) {\n          // Buy signal\n          trades.push({\n            symbol: symbol,\n            entry_date: currentDate,\n            entry_price: symbolData[i].close,\n            position_size: 1000,\n            signal_type: 'LONG',\n            strategy: strategy.strategy_id\n          });\n          currentPosition = { symbol, entryPrice: symbolData[i].close };\n        }\n      }\n      \n      // Exit logic\n      if (currentPosition && currentPosition.symbol === symbol) {\n        const holdingDays = Math.floor((currentDate - currentPosition.entryDate) / (1000 * 60 * 60 * 24));\n        if (holdingDays >= strategy.holding_period) {\n          trades.push({\n            symbol: symbol,\n            exit_date: currentDate,\n            exit_price: symbolData[i].close,\n            pnl: (symbolData[i].close - currentPosition.entryPrice) * 1000,\n            strategy: strategy.strategy_id\n          });\n          currentPosition = null;\n        }\n      }\n    }\n  });\n  \n  return {\n    strategy_id: strategy.strategy_id,\n    strategy_name: strategy.name,\n    total_trades: trades.length,\n    trades: trades,\n    backtest_period: {\n      start: '2018-01-01',\n      end: '2023-12-31'\n    }\n  };\n};\n\nconst strategy = items[0].json;\nconst priceData = items[1].json;\n\nconst backtestResult = backtestStrategy(strategy, priceData);\n\nreturn [{ json: backtestResult }];"
+      },
+      "id": "execute-backtest",
+      "name": "Execute Strategy Backtest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Calculate comprehensive performance metrics\nconst calculatePerformance = (backtestResult) => {\n  const trades = backtestResult.trades.filter(t => t.pnl !== undefined);\n  \n  if (trades.length === 0) {\n    return {\n      ...backtestResult,\n      metrics: {\n        error: 'No completed trades for analysis'\n      }\n    };\n  }\n  \n  const totalPnL = trades.reduce((sum, trade) => sum + trade.pnl, 0);\n  const winningTrades = trades.filter(t => t.pnl > 0);\n  const losingTrades = trades.filter(t => t.pnl < 0);\n  \n  const metrics = {\n    total_trades: trades.length,\n    winning_trades: winningTrades.length,\n    losing_trades: losingTrades.length,\n    win_rate: winningTrades.length / trades.length,\n    total_pnl: totalPnL,\n    average_win: winningTrades.reduce((sum, t) => sum + t.pnl, 0) / winningTrades.length,\n    average_loss: losingTrades.reduce((sum, t) => sum + t.pnl, 0) / losingTrades.length,\n    profit_factor: Math.abs(winningTrades.reduce((sum, t) => sum + t.pnl, 0) / losingTrades.reduce((sum, t) => sum + t.pnl, 0)),\n    largest_win: Math.max(...winningTrades.map(t => t.pnl)),\n    largest_loss: Math.min(...losingTrades.map(t => t.pnl)),\n    sharpe_ratio: totalPnL / (Math.std(trades.map(t => t.pnl)) * Math.sqrt(252)),\n    max_drawdown: calculateMaxDrawdown(trades),\n    calmar_ratio: totalPnL / calculateMaxDrawdown(trades),\n    analysis_timestamp: new Date().toISOString()\n  };\n  \n  return {\n    ...backtestResult,\n    performance_metrics: metrics\n  };\n};\n\n// Helper function for max drawdown\nconst calculateMaxDrawdown = (trades) => {\n  let peak = -Infinity;\n  let maxDrawdown = 0;\n  let runningTotal = 0;\n  \n  trades.forEach(trade => {\n    runningTotal += trade.pnl;\n    if (runningTotal > peak) {\n      peak = runningTotal;\n    }\n    const drawdown = peak - runningTotal;\n    if (drawdown > maxDrawdown) {\n      maxDrawdown = drawdown;\n    }\n  });\n  \n  return maxDrawdown;\n};\n\n// Add std function to Math\nMath.std = function(arr) {\n  const mean = arr.reduce((sum, val) => sum + val, 0) / arr.length;\n  return Math.sqrt(arr.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / arr.length);\n};\n\nconst result = calculatePerformance(items[0].json);\nreturn [{ json: result }];"
+      },
+      "id": "calculate-performance",
+      "name": "Calculate Performance Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "backtest_results",
+        "columns": {
+          "strategy_id": "={{ $json.strategy_id }}",
+          "strategy_name": "={{ $json.strategy_name }}",
+          "total_trades": "={{ $json.performance_metrics.total_trades }}",
+          "win_rate": "={{ $json.performance_metrics.win_rate }}",
+          "total_pnl": "={{ $json.performance_metrics.total_pnl }}",
+          "sharpe_ratio": "={{ $json.performance_metrics.sharpe_ratio }}",
+          "max_drawdown": "={{ $json.performance_metrics.max_drawdown }}",
+          "profit_factor": "={{ $json.performance_metrics.profit_factor }}",
+          "backtest_period_start": "={{ $json.backtest_period.start }}",
+          "backtest_period_end": "={{ $json.backtest_period.end }}",
+          "analysis_timestamp": "={{ $json.performance_metrics.analysis_timestamp }}"
+        },
+        "additionalFields": {}
+      },
+      "id": "store-backtest-results",
+      "name": "Store Backtest Results in Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "Backtest Results - {{ $json.strategy_name }} - {{ $now }}",
+        "body": "Strategy Backtest Performance Report:\n\nStrategy: {{ $json.strategy_name }}\nPeriod: {{ $json.backtest_period.start }} to {{ $json.backtest_period.end }}\n\nPerformance Metrics:\n• Total Trades: {{ $json.performance_metrics.total_trades }}\n• Win Rate: {{ ($json.performance_metrics.win_rate * 100).toFixed(1) }}%\n• Total P&L: ${{ $json.performance_metrics.total_pnl.toLocaleString() }}\n• Sharpe Ratio: {{ $json.performance_metrics.sharpe_ratio.toFixed(2) }}\n• Max Drawdown: ${{ $json.performance_metrics.max_drawdown.toLocaleString() }}\n• Profit Factor: {{ $json.performance_metrics.profit_factor.toFixed(2) }}\n\nGenerated: {{ $json.performance_metrics.analysis_timestamp }}",
+        "to": "={{ $vars.QUANT_RESEARCH_TEAM_EMAIL }}",
+        "additionalFields": {}
+      },
+      "id": "email-backtest-report",
+      "name": "Email Backtest Performance Report",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        500
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Backtest Trigger": {
+      "main": [
+        [
+          {
+            "node": "Load Strategy Configurations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Strategy Configurations": {
+      "main": [
+        [
+          {
+            "node": "Fetch Historical Price Data for Universe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Historical Price Data for Universe": {
+      "main": [
+        [
+          {
+            "node": "Execute Strategy Backtest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Strategy Backtest": {
+      "main": [
+        [
+          {
+            "node": "Calculate Performance Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Performance Metrics": {
+      "main": [
+        [
+          {
+            "node": "Store Backtest Results in Database",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Email Backtest Performance Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

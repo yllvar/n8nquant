@@ -1,0 +1,353 @@
+{
+  "name": "FX Exposure Hedging Automation",
+  "version": 1,
+  "tags": ["fx", "hedging", "currency", "risk-management"],
+  "description": "Automates foreign exchange exposure monitoring, hedge ratio calculation, and execution of hedging strategies with real-time FX rate monitoring",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            15
+          ],
+          "hour": [
+            "6-22"
+          ],
+          "minute": [
+            "0,15,30,45"
+          ]
+        }
+      },
+      "id": "fx-monitoring-trigger",
+      "name": "FX Exposure Monitoring Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    portfolio_id,\n    currency,\n    SUM(market_value) as total_exposure,\n    COUNT(*) as position_count\nFROM portfolio_positions \nWHERE currency != 'USD'\nAND active = true\nGROUP BY portfolio_id, currency\nHAVING SUM(market_value) > 100000",
+        "additionalFields": {}
+      },
+      "id": "fetch-fx-exposures",
+      "name": "Fetch Non-USD Currency Exposures",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.FX_API_URL }}/v1/latest",
+        "method": "GET",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $vars.FX_API_KEY }}"
+            }
+          ]
+        },
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "base",
+              "value": "USD"
+            },
+            {
+              "name": "symbols",
+              "value": "EUR,GBP,JPY,CHF,CAD,AUD"
+            }
+          ]
+        }
+      },
+      "id": "fetch-fx-rates",
+      "name": "Fetch Real-Time FX Rates",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        460,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Calculate optimal hedge ratios and generate hedge orders\nconst calculateHedgeRequirements = (exposures, fxRates) => {\n  const hedgeOrders = [];\n  const exposureThreshold = 500000; // $500K threshold for hedging\n  const maxHedgeRatio = 0.95; // Maximum 95% hedge ratio\n  \n  exposures.forEach(exposure => {\n    const currency = exposure.currency;\n    const fxRate = fxRates.rates[currency];\n    \n    if (!fxRate) {\n      console.log(`No FX rate available for ${currency}`);\n      return;\n    }\n    \n    const usdExposure = exposure.total_exposure / fxRate;\n    const exposureMagnitude = Math.abs(usdExposure);\n    \n    // Only hedge exposures above threshold\n    if (exposureMagnitude > exposureThreshold) {\n      const hedgeRatio = calculateOptimalHedgeRatio(usdExposure, exposureMagnitude, maxHedgeRatio);\n      const hedgeAmount = usdExposure * hedgeRatio;\n      \n      // Determine hedge direction\n      const hedgeDirection = usdExposure > 0 ? 'SELL' : 'BUY';\n      const baseCurrency = hedgeDirection === 'SELL' ? currency : 'USD';\n      const quoteCurrency = hedgeDirection === 'SELL' ? 'USD' : currency;\n      \n      hedgeOrders.push({\n        order_id: `FXHEDGE_${exposure.portfolio_id}_${currency}_${Date.now()}`,\n        portfolio_id: exposure.portfolio_id,\n        currency_pair: `${baseCurrency}/${quoteCurrency}`,\n        base_currency: baseCurrency,\n        quote_currency: quoteCurrency,\n        hedge_direction: hedgeDirection,\n        notional_amount: Math.abs(hedgeAmount),\n        hedge_ratio: hedgeRatio,\n        original_exposure: usdExposure,\n        current_fx_rate: fxRate,\n        exposure_currency: currency,\n        calculation_timestamp: new Date().toISOString(),\n        hedge_strategy: 'OPTIMAL_RATIO',\n        risk_parameters: {\n          max_notional: 10000000,\n          min_notional: 100000,\n          max_tenor: '3M',\n          allowed_instruments: ['SPOT', 'FWARD']\n        }\n      });\n    }\n  });\n  \n  return hedgeOrders;\n};\n\nconst calculateOptimalHedgeRatio = (exposure, magnitude, maxRatio) => {\n  // Dynamic hedge ratio based on exposure size and volatility\n  let baseRatio = 0.0;\n  \n  if (magnitude > 5000000) baseRatio = 0.90; // Large exposure: 90%\n  else if (magnitude > 1000000) baseRatio = 0.80; // Medium exposure: 80%\n  else if (magnitude > 500000) baseRatio = 0.70; // Small exposure: 70%\n  \n  // Adjust for market conditions (simplified)\n  const marketAdjustment = 0.05; // Could be based on VIX or FX volatility\n  \n  return Math.min(baseRatio + marketAdjustment, maxRatio);\n};\n\nconst exposures = items[0].json;\nconst fxRates = items[1].json;\n\nconst hedgeOrders = calculateHedgeRequirements(exposures, fxRates);\n\nreturn hedgeOrders.map(order => ({ json: order }));"
+      },
+      "id": "calculate-hedge-orders",
+      "name": "Calculate Optimal Hedge Orders",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-hedge-required",
+              "leftValue": "={{ $json.notional_amount }}",
+              "rightValue": 100000,
+              "operator": {
+                "type": "number",
+                "operation": "greaterThan"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-hedge-orders",
+      "name": "Filter Hedge Orders Above Threshold",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.TRADING_API_URL }}/v1/orders/fx",
+        "method": "POST",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $vars.TRADING_API_KEY }}"
+            },
+            {
+              "name": "X-Strategy-ID",
+              "value": "FX_HEDGING_AUTO"
+            }
+          ]
+        },
+        "body": "={{\n  {\n    \"order_type\": \"LIMIT\",\n    \"currency_pair\": $json.currency_pair,\n    \"side\": $json.hedge_direction,\n    \"quantity\": $json.notional_amount,\n    \"limit_price\": $json.current_fx_rate,\n    \"time_in_force\": \"GTC\",\n    \"strategy\": \"FX_HEDGE\",\n    \"hedge_metadata\": {\n      \"portfolio_id\": $json.portfolio_id,\n      \"original_exposure\": $json.original_exposure,\n      \"hedge_ratio\": $json.hedge_ratio\n    }\n  }\n}}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "execute-hedge-order",
+      "name": "Execute FX Hedge Order",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "fx_hedge_orders",
+        "columns": {
+          "order_id": "={{ $json.order_id }}",
+          "portfolio_id": "={{ $json.portfolio_id }}",
+          "currency_pair": "={{ $json.currency_pair }}",
+          "hedge_direction": "={{ $json.hedge_direction }}",
+          "notional_amount": "={{ $json.notional_amount }}",
+          "hedge_ratio": "={{ $json.hedge_ratio }}",
+          "fx_rate": "={{ $json.current_fx_rate }}",
+          "original_exposure": "={{ $json.original_exposure }}",
+          "execution_status": "={{ $json.execution_status || 'PENDING' }}",
+          "calculation_timestamp": "={{ $json.calculation_timestamp }}",
+          "strategy": "={{ $json.hedge_strategy }}"
+        },
+        "additionalFields": {}
+      },
+      "id": "store-hedge-order",
+      "name": "Store Hedge Order Record",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $vars.SLACK_TREASURY_CHANNEL }}",
+        "text": "🛡️ FX HEDGE EXECUTED\n• Portfolio: {{ $json.portfolio_id }}\n• Currency: {{ $json.currency_pair }}\n• Direction: {{ $json.hedge_direction }}\n• Amount: {{ $json.notional_amount.toLocaleString() }} {{ $json.base_currency }}\n• Hedge Ratio: {{ ($json.hedge_ratio * 100).toFixed(1) }}%\n• FX Rate: {{ $json.current_fx_rate }}\n• Exposure: {{ $json.original_exposure.toLocaleString() }} USD\n• Time: {{ $json.calculation_timestamp }}",
+        "additionalFields": {}
+      },
+      "id": "alert-treasury-team",
+      "name": "Alert Treasury Team on Hedge Execution",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Calculate post-hedge exposure and effectiveness\nconst calculateHedgeEffectiveness = (hedgeOrders, exposures, fxRates) => {\n  const effectivenessReport = {\n    report_timestamp: new Date().toISOString(),\n    total_exposures: exposures.length,\n    total_hedges: hedgeOrders.length,\n    hedge_notional: hedgeOrders.reduce((sum, order) => sum + order.notional_amount, 0),\n    exposure_analysis: [],\n    portfolio_summary: {}\n  };\n  \n  // Calculate remaining exposure after hedging\n  exposures.forEach(exposure => {\n    const currency = exposure.currency;\n    const fxRate = fxRates.rates[currency];\n    const portfolioHedges = hedgeOrders.filter(order => \n      order.portfolio_id === exposure.portfolio_id && \n      order.exposure_currency === currency\n    );\n    \n    const totalHedgeNotional = portfolioHedges.reduce((sum, hedge) => sum + hedge.notional_amount, 0);\n    const originalUsdExposure = exposure.total_exposure / fxRate;\n    const remainingExposure = originalUsdExposure - (totalHedgeNotional * Math.sign(originalUsdExposure));\n    \n    effectivenessReport.exposure_analysis.push({\n      portfolio_id: exposure.portfolio_id,\n      currency: currency,\n      original_exposure_usd: originalUsdExposure,\n      hedge_notional: totalHedgeNotional,\n      remaining_exposure: remainingExposure,\n      hedge_effectiveness: 1 - (Math.abs(remainingExposure) / Math.abs(originalUsdExposure)),\n      fx_rate: fxRate\n    });\n  });\n  \n  // Portfolio-level summary\n  const totalOriginalExposure = effectivenessReport.exposure_analysis.reduce((sum, exp) => sum + Math.abs(exp.original_exposure_usd), 0);\n  const totalRemainingExposure = effectivenessReport.exposure_analysis.reduce((sum, exp) => sum + Math.abs(exp.remaining_exposure), 0);\n  \n  effectivenessReport.portfolio_summary = {\n    total_original_exposure: totalOriginalExposure,\n    total_remaining_exposure: totalRemainingExposure,\n    overall_hedge_effectiveness: 1 - (totalRemainingExposure / totalOriginalExposure),\n    average_hedge_ratio: effectivenessReport.hedge_notional / totalOriginalExposure\n  };\n  \n  return effectivenessReport;\n};\n\nconst hedgeOrders = items[0].json;\nconst exposures = items[1].json;\nconst fxRates = items[2].json;\n\nconst effectivenessReport = calculateHedgeEffectiveness(hedgeOrders, exposures, fxRates);\n\nreturn [{ json: effectivenessReport }];"
+      },
+      "id": "calculate-effectiveness",
+      "name": "Calculate Hedge Effectiveness",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "FX Hedge Effectiveness Report - {{ $now }}",
+        "body": "FX Exposure Hedging Effectiveness Report:\n\nPortfolio Summary:\n• Total Original Exposure: ${{ $json.portfolio_summary.total_original_exposure.toLocaleString() }}\n• Total Remaining Exposure: ${{ $json.portfolio_summary.total_remaining_exposure.toLocaleString() }}\n• Overall Effectiveness: {{ ($json.portfolio_summary.overall_hedge_effectiveness * 100).toFixed(1) }}%\n• Average Hedge Ratio: {{ ($json.portfolio_summary.average_hedge_ratio * 100).toFixed(1) }}%\n\nExposure Analysis:\n{{ $json.exposure_analysis.map(exp => `• ${exp.portfolio_id} - ${exp.currency}: ${(exp.hedge_effectiveness * 100).toFixed(1)}% effective ($${exp.remaining_exposure.toLocaleString()} remaining)`).join('\\n') }}\n\nGenerated: {{ $json.report_timestamp }}",
+        "to": "={{ $vars.TREASURY_TEAM_EMAIL }}",
+        "additionalFields": {}
+      },
+      "id": "email-effectiveness-report",
+      "name": "Email Hedge Effectiveness Report",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        500
+      ]
+    }
+  ],
+  "connections": {
+    "FX Exposure Monitoring Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Non-USD Currency Exposures",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Real-Time FX Rates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Non-USD Currency Exposures": {
+      "main": [
+        [
+          {
+            "node": "Calculate Optimal Hedge Orders",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Calculate Hedge Effectiveness",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Fetch Real-Time FX Rates": {
+      "main": [
+        [
+          {
+            "node": "Calculate Optimal Hedge Orders",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Calculate Hedge Effectiveness",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Calculate Optimal Hedge Orders": {
+      "main": [
+        [
+          {
+            "node": "Filter Hedge Orders Above Threshold",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Calculate Hedge Effectiveness",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Hedge Orders Above Threshold": {
+      "main": [
+        [
+          {
+            "node": "Execute FX Hedge Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute FX Hedge Order": {
+      "main": [
+        [
+          {
+            "node": "Store Hedge Order Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Hedge Order Record": {
+      "main": [
+        [
+          {
+            "node": "Alert Treasury Team on Hedge Execution",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Hedge Effectiveness": {
+      "main": [
+        [
+          {
+            "node": "Email Hedge Effectiveness Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,293 @@
+{
+  "name": "Corporate Bond Pricing Engine",
+  "version": 1,
+  "tags": ["bond", "pricing", "credit", "fixed-income", "valuation"],
+  "description": "Real-time corporate bond pricing engine with credit risk adjustment and liquidity factors",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            15
+          ],
+          "hour": [
+            "*"
+          ],
+          "minute": [
+            "*/15"
+          ]
+        }
+      },
+      "id": "bond-pricing-trigger",
+      "name": "15-Minute Bond Pricing Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.TRACE_API_URL }}/bonds",
+        "method": "GET",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $vars.TRACE_API_KEY }}"
+            }
+          ]
+        },
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "tradeType",
+              "value": "ALL"
+            },
+            {
+              "name": "timeRange",
+              "value": "1D"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "fetch-trace-data",
+      "name": "Fetch TRACE Transaction Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    bond_id,\n    isin,\n    issuer,\n    coupon_rate,\n    maturity_date,\n    face_value,\n    credit_rating,\n    sector,\n    industry,\n    issue_date,\n    last_pricing_date,\n    last_clean_price\nFROM corporate_bonds \nWHERE active = true\nAND maturity_date > CURRENT_DATE",
+        "additionalFields": {}
+      },
+      "id": "fetch-bond-metadata",
+      "name": "Fetch Bond Metadata",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Bond pricing engine with credit and liquidity adjustments\nconst priceBonds = (traceData, bondMetadata) => {\n  return bondMetadata.map(bond => {\n    // Get recent trades for this bond\n    const recentTrades = traceData.filter(trade => trade.isin === bond.isin);\n    \n    // Calculate clean price using Black-Scholes or similar model (simplified)\n    const cleanPrice = calculateCleanPrice(bond);\n    \n    // Apply credit spread adjustment based on rating\n    const creditSpread = getCreditSpread(bond.credit_rating);\n    const creditAdjustedPrice = cleanPrice - (cleanPrice * creditSpread);\n    \n    // Apply liquidity adjustment based on trading volume\n    const avgVolume = recentTrades.length > 0 \n      ? recentTrades.reduce((sum, trade) => sum + trade.quantity, 0) / recentTrades.length \n      : 0;\n    const liquidityAdjustment = calculateLiquidityAdjustment(avgVolume);\n    const liquidityAdjustedPrice = creditAdjustedPrice * (1 - liquidityAdjustment);\n    \n    // Calculate yield to maturity\n    const ytm = calculateYTM(bond, liquidityAdjustedPrice);\n    \n    // Calculate Greeks\n    const duration = calculateDuration(bond, ytm);\n    const convexity = calculateConvexity(bond, ytm);\n    \n    return {\n      bond_id: bond.bond_id,\n      isin: bond.isin,\n      issuer: bond.issuer,\n      clean_price: liquidityAdjustedPrice,\n      ytm: ytm,\n      duration: duration,\n      convexity: convexity,\n      credit_spread: creditSpread,\n      liquidity_adjustment: liquidityAdjustment,\n      last_traded_price: recentTrades.length > 0 ? recentTrades[recentTrades.length - 1].price : null,\n      pricing_timestamp: new Date().toISOString(),\n      pricing_model: 'credit_and_liquidity_adjusted'\n    };\n  });\n};\n\n// Helper functions\nconst calculateCleanPrice = (bond) => {\n  // Simplified pricing calculation\n  const yearsToMaturity = (new Date(bond.maturity_date) - new Date()) / (1000 * 60 * 60 * 24 * 365);\n  const discountRate = 0.05; // Simplified discount rate\n  const pvOfCoupons = bond.coupon_rate * bond.face_value * (1 - Math.pow(1 + discountRate, -yearsToMaturity)) / discountRate;\n  const pvOfPrincipal = bond.face_value / Math.pow(1 + discountRate, yearsToMaturity);\n  return pvOfCoupons + pvOfPrincipal;\n};\n\nconst getCreditSpread = (rating) => {\n  const spreads = {\n    'AAA': 0.0005, 'AA': 0.001, 'A': 0.002,\n    'BBB': 0.005, 'BB': 0.01, 'B': 0.02,\n    'CCC': 0.05, 'CC': 0.1, 'C': 0.15\n  };\n  return spreads[rating] || 0.03;\n};\n\nconst calculateLiquidityAdjustment = (avgVolume) => {\n  // Higher volume = lower liquidity discount\n  if (avgVolume > 1000000) return 0.0001;\n  if (avgVolume > 500000) return 0.0005;\n  if (avgVolume > 100000) return 0.001;\n  return 0.005;\n};\n\nconst calculateYTM = (bond, price) => {\n  // Simplified YTM calculation\n  const yearsToMaturity = (new Date(bond.maturity_date) - new Date()) / (1000 * 60 * 60 * 24 * 365);\n  const annualCoupon = bond.coupon_rate * bond.face_value;\n  const principalDiff = bond.face_value - price;\n  const avgPrice = (bond.face_value + price) / 2;\n  return (annualCoupon + (principalDiff / yearsToMaturity)) / avgPrice;\n};\n\nconst calculateDuration = (bond, ytm) => {\n  // Simplified duration calculation\n  const yearsToMaturity = (new Date(bond.maturity_date) - new Date()) / (1000 * 60 * 60 * 24 * 365);\n  return yearsToMaturity / (1 + ytm);\n};\n\nconst calculateConvexity = (bond, ytm) => {\n  // Simplified convexity calculation\n  const yearsToMaturity = (new Date(bond.maturity_date) - new Date()) / (1000 * 60 * 60 * 24 * 365);\n  return (yearsToMaturity * (yearsToMaturity + 1)) / Math.pow(1 + ytm, 2);\n};\n\nconst traceData = items[0].json.trades || [];\nconst bondMetadata = items[1].json;\nconst pricedBonds = priceBonds(traceData, bondMetadata);\nreturn pricedBonds.map(bond => ({ json: bond }));"
+      },
+      "id": "calculate-bond-prices",
+      "name": "Calculate Bond Prices and Greeks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "table": "bond_prices",
+        "columns": {
+          "bond_id": "={{ $json.bond_id }}",
+          "isin": "={{ $json.isin }}",
+          "clean_price": "={{ $json.clean_price }}",
+          "ytm": "={{ $json.ytm }}",
+          "duration": "={{ $json.duration }}",
+          "convexity": "={{ $json.convexity }}",
+          "credit_spread": "={{ $json.credit_spread }}",
+          "liquidity_adjustment": "={{ $json.liquidity_adjustment }}",
+          "last_traded_price": "={{ $json.last_traded_price }}",
+          "pricing_timestamp": "={{ $json.pricing_timestamp }}",
+          "pricing_model": "={{ $json.pricing_model }}"
+        },
+        "additionalFields": {
+          "updateKey": "bond_id"
+        }
+      },
+      "id": "store-bond-prices",
+      "name": "Store Bond Pricing Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-large-price-change",
+              "leftValue": "={{ Math.abs($json.clean_price - $json.last_clean_price) / $json.last_clean_price }}",
+              "rightValue": 0.05,
+              "operator": {
+                "type": "number",
+                "operation": "greaterThan"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-price-changes",
+      "name": "Check for Large Price Changes",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $vars.SLACK_RISK_CHANNEL }}",
+        "text": "📈 BOND PRICE ALERT\n• ISIN: {{ $json.isin }}\n• Issuer: {{ $json.issuer }}\n• Clean Price: ${{ $json.clean_price.toFixed(2) }}\n• Previous Price: ${{ $json.last_clean_price.toFixed(2) }}\n• Change: {{ (($json.clean_price - $json.last_clean_price) / $json.last_clean_price * 100).toFixed(2) }}%\n• Time: {{ $json.pricing_timestamp }}\n• Action: Review pricing model",
+        "additionalFields": {}
+      },
+      "id": "send-price-alert",
+      "name": "Send Bond Price Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate bond pricing summary\nconst summary = {\n  date: new Date().toISOString().split('T')[0],\n  bonds_priced: items.length,\n  avg_price_change: items.reduce((sum, item) => sum + (item.json.clean_price - item.json.last_clean_price), 0) / items.length,\n  pricing_timestamp: new Date().toISOString(),\n  top_movers: items.sort((a, b) => Math.abs(b.json.clean_price - b.json.last_clean_price) - Math.abs(a.json.clean_price - a.json.last_clean_price)).slice(0, 5).map(item => ({\n    isin: item.json.isin,\n    issuer: item.json.issuer,\n    price_change: item.json.clean_price - item.json.last_clean_price\n  }))\n};\nreturn [{ json: summary }];"
+      },
+      "id": "generate-bond-summary",
+      "name": "Generate Bond Pricing Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "Bond Pricing Report - {{ $json.date }}",
+        "body": "Bond Pricing Summary:\n• Bonds Priced: {{ $json.bonds_priced }}\n• Average Price Change: ${{ $json.avg_price_change.toFixed(2) }}\n\nTop Movers:\n{{ $json.top_movers.map(mover => `• ${mover.isin} (${mover.issuer}): $${mover.price_change.toFixed(2)}`).join('\\n') }}\n\nGenerated: {{ $json.pricing_timestamp }}",
+        "to": "={{ $vars.FIXED_INCOME_TEAM_EMAIL }}",
+        "additionalFields": {}
+      },
+      "id": "email-bond-report",
+      "name": "Email Bond Pricing Report",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "15-Minute Bond Pricing Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch TRACE Transaction Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch TRACE Transaction Data": {
+      "main": [
+        [
+          {
+            "node": "Calculate Bond Prices and Greeks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Bond Metadata": {
+      "main": [
+        [
+          {
+            "node": "Calculate Bond Prices and Greeks",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Calculate Bond Prices and Greeks": {
+      "main": [
+        [
+          {
+            "node": "Store Bond Pricing Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Bond Pricing Data": {
+      "main": [
+        [
+          {
+            "node": "Check for Large Price Changes",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Bond Pricing Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check for Large Price Changes": {
+      "main": [
+        [
+          {
+            "node": "Send Bond Price Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Bond Pricing Summary": {
+      "main": [
+        [
+          {
+            "node": "Email Bond Pricing Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

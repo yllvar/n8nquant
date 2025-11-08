@@ -1,0 +1,259 @@
+{
+  "name": "Multi-Scenario Stress Testing Engine",
+  "version": 1,
+  "tags": ["stress-testing", "risk", "scenario", "simulation"],
+  "description": "Executes comprehensive stress tests using multiple historical and hypothetical scenarios to assess portfolio resilience",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "hour": [
+            "6"
+          ],
+          "minute": [
+            "0"
+          ]
+        }
+      },
+      "id": "daily-stress-trigger",
+      "name": "Daily Stress Testing Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    scenario_id,\n    scenario_name,\n    shock_parameters,\n    active,\n    scenario_type\nFROM stress_scenarios \nWHERE active = true\nORDER BY priority DESC",
+        "additionalFields": {}
+      },
+      "id": "fetch-active-scenarios",
+      "name": "Fetch Active Stress Scenarios",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    p.portfolio_id,\n    p.portfolio_name,\n    pos.symbol,\n    pos.quantity,\n    pos.average_cost,\n    md.price as current_price\nFROM portfolios p\nJOIN positions pos ON p.portfolio_id = pos.portfolio_id\nJOIN market_data md ON pos.symbol = md.symbol\nWHERE p.active = true\nAND pos.quantity != 0\nAND md.update_timestamp >= NOW() - INTERVAL '1 hour'",
+        "additionalFields": {}
+      },
+      "id": "fetch-current-portfolio",
+      "name": "Fetch Current Portfolio Positions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Stress testing engine core logic\nconst runStressTest = (scenarios, portfolio) => {\n  const results = [];\n  scenarios.forEach(scenario => {\n    // Apply scenario shocks to portfolio\n    const shockedPortfolio = portfolio.map(position => {\n      const shock = JSON.parse(scenario.shock_parameters);\n      let shockedPrice = position.current_price;\n      \n      // Apply different shock types based on scenario\n      if (shock.type === 'absolute') {\n        shockedPrice = position.current_price + shock.amount;\n      } else if (shock.type === 'percentage') {\n        shockedPrice = position.current_price * (1 + shock.amount);\n      } else if (shock.type === 'correlation') {\n        // Apply correlated shocks based on asset relationships\n        shockedPrice = applyCorrelationShock(position, shock, portfolio);\n      }\n      \n      const marketValue = position.quantity * shockedPrice;\n      const pnl = (shockedPrice - position.average_cost) * position.quantity;\n      \n      return {\n        ...position,\n        shocked_price: shockedPrice,\n        shocked_market_value: marketValue,\n        shocked_pnl: pnl\n      };\n    });\n    \n    // Calculate portfolio-level metrics\n    const totalPnL = shockedPortfolio.reduce((sum, pos) => sum + pos.shocked_pnl, 0);\n    const totalMarketValue = shockedPortfolio.reduce((sum, pos) => sum + pos.shocked_market_value, 0);\n    \n    results.push({\n      scenario_id: scenario.scenario_id,\n      scenario_name: scenario.scenario_name,\n      scenario_type: scenario.scenario_type,\n      portfolio_id: portfolio[0].portfolio_id,\n      portfolio_name: portfolio[0].portfolio_name,\n      total_pnl: totalPnL,\n      total_market_value: totalMarketValue,\n      positions_affected: shockedPortfolio.length,\n      calculation_timestamp: new Date().toISOString()\n    });\n  });\n  \n  return results;\n};\n\nconst scenarios = items[0].json;\nconst portfolio = items[1].json;\nconst stressResults = runStressTest(scenarios, portfolio);\nreturn stressResults.map(result => ({ json: result }));"
+      },
+      "id": "execute-stress-test",
+      "name": "Execute Stress Test Scenarios",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "stress_test_results",
+        "columns": {
+          "scenario_id": "={{ $json.scenario_id }}",
+          "portfolio_id": "={{ $json.portfolio_id }}",
+          "total_pnl": "={{ $json.total_pnl }}",
+          "total_market_value": "={{ $json.total_market_value }}",
+          "positions_affected": "={{ $json.positions_affected }}",
+          "calculation_timestamp": "={{ $json.calculation_timestamp }}",
+          "scenario_name": "={{ $json.scenario_name }}",
+          "scenario_type": "={{ $json.scenario_type }}"
+        },
+        "additionalFields": {}
+      },
+      "id": "store-stress-results",
+      "name": "Store Stress Test Results",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate stress test summary\nconst summary = {\n  date: new Date().toISOString().split('T')[0],\n  total_scenarios_run: items.length,\n  worst_case_pnl: Math.min(...items.map(item => item.json.total_pnl)),\n  best_case_pnl: Math.max(...items.map(item => item.json.total_pnl)),\n  average_pnl: items.reduce((sum, item) => sum + item.json.total_pnl, 0) / items.length,\n  scenarios_with_negative_pnl: items.filter(item => item.json.total_pnl < 0).length,\n  summary_timestamp: new Date().toISOString(),\n  details: items.map(item => ({\n    scenario: item.json.scenario_name,\n    pnl: item.json.total_pnl,\n    portfolio: item.json.portfolio_name\n  }))\n};\nreturn [{ json: summary }];"
+      },
+      "id": "generate-summary",
+      "name": "Generate Stress Test Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "Daily Stress Test Report - {{ $json.date }}",
+        "body": "Stress Testing Summary:\n• Total Scenarios Run: {{ $json.total_scenarios_run }}\n• Worst Case P&L: ${{ $json.worst_case_pnl.toLocaleString() }}\n• Best Case P&L: ${{ $json.best_case_pnl.toLocaleString() }}\n• Average P&L: ${{ $json.average_pnl.toLocaleString() }}\n• Scenarios with Negative P&L: {{ $json.scenarios_with_negative_pnl }}\n\nDetailed Results:\n{{ $json.details.map(detail => `• ${detail.scenario}: ${detail.portfolio} - $${detail.pnl.toLocaleString()}`).join('\\n') }}\n\nGenerated: {{ $json.summary_timestamp }}",
+        "to": "={{ $vars.RISK_TEAM_EMAIL }}",
+        "additionalFields": {}
+      },
+      "id": "email-stress-report",
+      "name": "Email Stress Test Report",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-negative-pnl",
+              "leftValue": "={{ $json.total_pnl }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "lessThan"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-negative-results",
+      "name": "Check for Negative Stress Results",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $vars.SLACK_RISK_CHANNEL }}",
+        "text": "⚠️ STRESS TEST ALERT\n• Scenario: {{ $json.scenario_name }}\n• Portfolio: {{ $json.portfolio_name }}\n• Negative P&L: ${{ $json.total_pnl.toLocaleString() }}\n• Time: {{ $json.calculation_timestamp }}\n• Action Required: Review portfolio exposure",
+        "additionalFields": {}
+      },
+      "id": "send-stress-alert",
+      "name": "Send Stress Test Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        500
+      ]
+    }
+  ],
+  "connections": {
+    "Daily Stress Testing Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Active Stress Scenarios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Active Stress Scenarios": {
+      "main": [
+        [
+          {
+            "node": "Execute Stress Test Scenarios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Current Portfolio Positions": {
+      "main": [
+        [
+          {
+            "node": "Execute Stress Test Scenarios",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Execute Stress Test Scenarios": {
+      "main": [
+        [
+          {
+            "node": "Store Stress Test Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Stress Test Results": {
+      "main": [
+        [
+          {
+            "node": "Generate Stress Test Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check for Negative Stress Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Stress Test Summary": {
+      "main": [
+        [
+          {
+            "node": "Email Stress Test Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check for Negative Stress Results": {
+      "main": [
+        [
+          {
+            "node": "Send Stress Test Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

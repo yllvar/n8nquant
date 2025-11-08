@@ -1,0 +1,299 @@
+{
+  "name": "MiFID II Transaction Reporting Engine",
+  "version": 1,
+  "tags": ["compliance", "regulatory", "mifid", "reporting"],
+  "description": "Automates MiFID II transaction reporting with validation, formatting, submission, and compliance monitoring",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "hour": [
+            "18"
+          ],
+          "minute": [
+            "0"
+          ]
+        }
+      },
+      "id": "eod-reporting-trigger",
+      "name": "End-of-Day Reporting Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    t.trade_id,\n    t.symbol,\n    t.quantity,\n    t.price,\n    t.trade_date,\n    t.trade_time,\n    t.buy_sell_indicator,\n    t.execution_venue,\n    c.client_id,\n    c.client_name,\n    c.client_type,\n    i.instrument_type,\n    i.isin,\n    i.currency\nFROM trades t\nJOIN clients c ON t.client_id = c.client_id\nJOIN instruments i ON t.symbol = i.symbol\nWHERE t.trade_date = CURRENT_DATE\nAND t.reporting_status = 'PENDING'\nAND t.regulatory_report_required = true",
+        "additionalFields": {}
+      },
+      "id": "fetch-daily-trades",
+      "name": "Fetch Today's Trades for Reporting",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "validate-quantity",
+              "leftValue": "={{ $json.quantity }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "notEquals"
+              }
+            },
+            {
+              "id": "validate-price",
+              "leftValue": "={{ $json.price }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "greaterThan"
+              }
+            },
+            {
+              "id": "validate-isin",
+              "leftValue": "={{ $json.isin }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "validate-trade-data",
+      "name": "Validate Trade Data Completeness",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Format trades for MiFID II XML reporting\nconst formatMiFIDReport = (trades) => {\n  const reportDate = new Date().toISOString().split('T')[0];\n  const xmlHeader = `<?xml version=\\\"1.0\\\" encoding=\\\"UTF-8\\\"?>\n<MiFIDTransactionReport xmlns=\\\"urn:fsa-gov-uk:MER:TX01\\\">\n  <Header>\n    <CreationTimestamp>${new Date().toISOString()}</CreationTimestamp>\n    <ReportingFirmID>${process.env.FIRM_LEI}</ReportingFirmID>\n    <ReportDate>${reportDate}</ReportDate>\n  </Header>\n  <Transactions>`;\n  const xmlTransactions = trades.map(trade => `\n    <Transaction>\n      <TransactionID>${trade.trade_id}</TransactionID>\n      <InstrumentID>\n        <ISIN>${trade.isin}</ISIN>\n      </InstrumentID>\n      <TransactionDateTime>${trade.trade_date}T${trade.trade_time}Z</TransactionDateTime>\n      <Price>\n        <Amount currency=\\\"${trade.currency}\\\">${trade.price}</Amount>\n      </Price>\n      <Quantity>${trade.quantity}</Quantity>\n      <BuySellIndicator>${trade.buy_sell_indicator}</BuySellIndicator>\n      <TradingVenue>${trade.execution_venue}</TradingVenue>\n      <ClientDetails>\n        <ClientID>${trade.client_id}</ClientID>\n        <ClientType>${trade.client_type}</ClientType>\n      </ClientDetails>\n    </Transaction>`).join('');\n  const xmlFooter = `\n  </Transactions>\n</MiFIDTransactionReport>`;\n  return xmlHeader + xmlTransactions + xmlFooter;\n};\nconst validTrades = items.map(item => item.json);\nconst xmlReport = formatMiFIDReport(validTrades);\nreturn [{ \n  json: {\n    report_id: `MIFID_${new Date().toISOString().replace(/[-:]/g, '').split('.')[0]}`,\n    report_timestamp: new Date().toISOString(),\n    trade_count: validTrades.length,\n    xml_content: xmlReport,\n    reporting_firm: process.env.FIRM_LEI\n  }\n}];"
+      },
+      "id": "format-xml-report",
+      "name": "Format MiFID II XML Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.REGULATORY_API_URL }}/v1/reports/transaction",
+        "method": "POST",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $vars.REGULATORY_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/xml"
+            },
+            {
+              "name": "X-Firm-LEI",
+              "value": "={{ $vars.FIRM_LEI }}"
+            }
+          ]
+        },
+        "body": "={{ $json.xml_content }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "submit-regulatory-report",
+      "name": "Submit Report to Regulatory API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "UPDATE trades \nSET reporting_status = 'SUBMITTED',\n    last_reporting_date = CURRENT_DATE,\n    regulatory_reference_id = '={{ $json.regulatory_reference }}'\nWHERE trade_id IN ({{ items.map(item => `'${item.json.trade_id}'`).join(',') }})",
+        "additionalFields": {}
+      },
+      "id": "update-reporting-status",
+      "name": "Update Trade Reporting Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "item",
+        "item": {
+          "json": {
+            "error_type": "Trade Validation Failed",
+            "failed_trade_id": "={{ $json.trade_id }}",
+            "validation_errors": "Missing required fields: ISIN, Price, or Quantity",
+            "workflow_name": "MiFID II Reporting",
+            "timestamp": "={{ new Date().toISOString() }}",
+            "severity": "high"
+          }
+        }
+      },
+      "id": "log-validation-failures",
+      "name": "Log Validation Failures for Compliance",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [
+        680,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $vars.SLACK_COMPLIANCE_CHANNEL }}",
+        "text": "⚠️ MiFID II Reporting Validation Issues\n• Failed trades: {{ items.length }}\n• Issues: Missing required regulatory fields\n• Time: {{ new Date().toISOString() }}\n• Action Required: Manual review needed for compliance",
+        "additionalFields": {}
+      },
+      "id": "alert-compliance-team",
+      "name": "Alert Compliance Team on Validation Issues",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        880,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "MiFID II Daily Reporting Summary - {{ $now }}",
+        "body": "MiFID II Transaction Reporting Summary:\n• Report ID: {{ $json.report_id }}\n• Submission Time: {{ $json.report_timestamp }}\n• Trades Successfully Reported: {{ $json.trade_count }}\n• Regulatory Reference: {{ $json.regulatory_reference }}\n• Reporting Firm: {{ $json.reporting_firm }}\nStatus: ✅ COMPLETED\nNext: Monitor for regulatory acknowledgements and any rejections.",
+        "to": "={{ $vars.COMPLIANCE_TEAM_EMAIL }}",
+        "additionalFields": {}
+      },
+      "id": "email-compliance-summary",
+      "name": "Email Compliance Reporting Summary",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 1,
+      "position": [
+        1320,
+        500
+      ]
+    }
+  ],
+  "connections": {
+    "End-of-Day Reporting Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Today's Trades for Reporting",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Today's Trades for Reporting": {
+      "main": [
+        [
+          {
+            "node": "Validate Trade Data Completeness",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Trade Data Completeness": {
+      "main": [
+        [
+          {
+            "node": "Format MiFID II XML Report",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Validation Failures for Compliance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format MiFID II XML Report": {
+      "main": [
+        [
+          {
+            "node": "Submit Report to Regulatory API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Submit Report to Regulatory API": {
+      "main": [
+        [
+          {
+            "node": "Update Trade Reporting Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Trade Reporting Status": {
+      "main": [
+        [
+          {
+            "node": "Email Compliance Reporting Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Validation Failures for Compliance": {
+      "main": [
+        [
+          {
+            "node": "Alert Compliance Team on Validation Issues",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

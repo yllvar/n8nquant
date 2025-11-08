@@ -1,0 +1,338 @@
+{
+  "name": "Automated Portfolio Reconciliation Engine",
+  "version": 1,
+  "tags": ["reconciliation", "portfolio", "operations", "breaks"],
+  "description": "Automates daily portfolio reconciliation between internal systems and prime brokers, identifies breaks, and initiates resolution workflows",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "hour": [
+            "18"
+          ],
+          "minute": [
+            "30"
+          ]
+        }
+      },
+      "id": "eod-reconciliation-trigger",
+      "name": "End-of-Day Reconciliation Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    portfolio_id,\n    symbol,\n    quantity,\n    cost_basis,\n    market_value,\n    unrealized_pnl,\n    currency,\n    position_date\nFROM portfolio_positions \nWHERE position_date = CURRENT_DATE\nAND active = true\nORDER BY portfolio_id, symbol",
+        "additionalFields": {}
+      },
+      "id": "fetch-internal-positions",
+      "name": "Fetch Internal Portfolio Positions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.PRIME_BROKER_API_URL }}/v1/positions",
+        "method": "GET",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $vars.PRIME_BROKER_API_KEY }}"
+            },
+            {
+              "name": "X-Account-ID",
+              "value": "={{ $vars.PRIME_BROKER_ACCOUNT }}"
+            }
+          ]
+        },
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "as_of_date",
+              "value": "={{ new Date().toISOString().split('T')[0] }}"
+            }
+          ]
+        }
+      },
+      "id": "fetch-prime-broker-positions",
+      "name": "Fetch Prime Broker Positions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        460,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Reconcile internal vs prime broker positions\nconst reconcilePositions = (internalPositions, brokerPositions) => {\n  const reconciliation = {\n    reconciliation_date: new Date().toISOString().split('T')[0],\n    summary: {\n      total_internal_positions: internalPositions.length,\n      total_broker_positions: brokerPositions.length,\n      matched_positions: 0,\n      breaks_found: 0,\n      breaks_by_severity: { critical: 0, high: 0, medium: 0, low: 0 }\n    },\n    breaks: [],\n    matches: []\n  };\n  \n  // Create maps for efficient lookup\n  const internalMap = {};\n  internalPositions.forEach(pos => {\n    const key = `${pos.portfolio_id}_${pos.symbol}`;\n    internalMap[key] = pos;\n  });\n  \n  const brokerMap = {};\n  brokerPositions.forEach(pos => {\n    const key = `${pos.account_id}_${pos.symbol}`;\n    brokerMap[key] = pos;\n  });\n  \n  // Check for matches and breaks\n  Object.keys(internalMap).forEach(key => {\n    const internalPos = internalMap[key];\n    const brokerPos = brokerMap[key];\n    \n    if (brokerPos) {\n      const breakDetails = comparePositions(internalPos, brokerPos);\n      \n      if (breakDetails.break_severity === 'MATCH') {\n        reconciliation.matches.push({\n          symbol: internalPos.symbol,\n          portfolio: internalPos.portfolio_id,\n          internal_quantity: internalPos.quantity,\n          broker_quantity: brokerPos.quantity,\n          status: 'MATCHED'\n        });\n        reconciliation.summary.matched_positions++;\n      } else {\n        reconciliation.breaks.push(breakDetails);\n        reconciliation.summary.breaks_found++;\n        reconciliation.summary.breaks_by_severity[breakDetails.break_severity]++;\n      }\n    } else {\n      // Position missing from broker\n      reconciliation.breaks.push({\n        break_id: `BREAK_${key}_${Date.now()}`,\n        symbol: internalPos.symbol,\n        portfolio: internalPos.portfolio_id,\n        break_type: 'MISSING_POSITION',\n        break_severity: 'critical',\n        internal_quantity: internalPos.quantity,\n        broker_quantity: 0,\n        quantity_difference: internalPos.quantity,\n        market_value_difference: internalPos.market_value,\n        description: `Position missing from prime broker records`,\n        reconciliation_date: reconciliation.reconciliation_date\n      });\n      reconciliation.summary.breaks_found++;\n      reconciliation.summary.breaks_by_severity.critical++;\n    }\n  });\n  \n  // Check for broker positions not in internal system\n  Object.keys(brokerMap).forEach(key => {\n    if (!internalMap[key]) {\n      const brokerPos = brokerMap[key];\n      reconciliation.breaks.push({\n        break_id: `BREAK_${key}_${Date.now()}`,\n        symbol: brokerPos.symbol,\n        portfolio: brokerPos.account_id,\n        break_type: 'EXTRA_POSITION',\n        break_severity: 'high',\n        internal_quantity: 0,\n        broker_quantity: brokerPos.quantity,\n        quantity_difference: -brokerPos.quantity,\n        market_value_difference: -brokerPos.market_value,\n        description: `Position in prime broker but not in internal system`,\n        reconciliation_date: reconciliation.reconciliation_date\n      });\n      reconciliation.summary.breaks_found++;\n      reconciliation.summary.breaks_by_severity.high++;\n    }\n  });\n  \n  return reconciliation;\n};\n\nconst comparePositions = (internalPos, brokerPos) => {\n  const quantityDiff = internalPos.quantity - brokerPos.quantity;\n  const marketValueDiff = internalPos.market_value - brokerPos.market_value;\n  const pnlDiff = internalPos.unrealized_pnl - brokerPos.unrealized_pnl;\n  \n  let breakType = '';\n  let breakSeverity = 'MATCH';\n  let description = '';\n  \n  // Quantity breaks\n  if (Math.abs(quantityDiff) > 0) {\n    if (Math.abs(quantityDiff) >= 1000) {\n      breakType = 'QUANTITY_DISCREPANCY_LARGE';\n      breakSeverity = 'critical';\n      description = `Large quantity discrepancy: ${quantityDiff} shares`;\n    } else if (Math.abs(quantityDiff) >= 100) {\n      breakType = 'QUANTITY_DISCREPANCY_MEDIUM';\n      breakSeverity = 'high';\n      description = `Medium quantity discrepancy: ${quantityDiff} shares`;\n    } else {\n      breakType = 'QUANTITY_DISCREPANCY_SMALL';\n      breakSeverity = 'medium';\n      description = `Small quantity discrepancy: ${quantityDiff} shares`;\n    }\n  }\n  \n  // Market value breaks\n  if (Math.abs(marketValueDiff) > 10000) {\n    breakType = breakType ? breakType + '_MARKET_VALUE' : 'MARKET_VALUE_DISCREPANCY';\n    breakSeverity = breakSeverity === 'MATCH' ? 'high' : breakSeverity;\n    description += description ? `, Market value diff: $${marketValueDiff}` : `Market value discrepancy: $${marketValueDiff}`;\n  }\n  \n  // PnL breaks\n  if (Math.abs(pnlDiff) > 5000) {\n    breakType = breakType ? breakType + '_PNL' : 'PNL_DISCREPANCY';\n    breakSeverity = breakSeverity === 'MATCH' ? 'medium' : breakSeverity;\n    description += description ? `, PnL diff: $${pnlDiff}` : `PnL discrepancy: $${pnlDiff}`;\n  }\n  \n  if (breakSeverity === 'MATCH') {\n    return { break_severity: 'MATCH' };\n  }\n  \n  return {\n    break_id: `BREAK_${internalPos.portfolio_id}_${internalPos.symbol}_${Date.now()}`,\n    symbol: internalPos.symbol,\n    portfolio: internalPos.portfolio_id,\n    break_type: breakType,\n    break_severity: breakSeverity,\n    internal_quantity: internalPos.quantity,\n    broker_quantity: brokerPos.quantity,\n    quantity_difference: quantityDiff,\n    market_value_difference: marketValueDiff,\n    pnl_difference: pnlDiff,\n    description: description,\n    reconciliation_date: new Date().toISOString().split('T')[0]\n  };\n};\n\nconst internalPositions = items[0].json;\nconst brokerPositions = Array.isArray(items[1].json) ? items[1].json : [items[1].json];\n\nconst reconciliation = reconcilePositions(internalPositions, brokerPositions);\n\nreturn [{ json: reconciliation }];"
+      },
+      "id": "reconcile-positions",
+      "name": "Reconcile Positions & Identify Breaks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-critical-breaks",
+              "leftValue": "={{ $json.summary.breaks_by_severity.critical }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "greaterThan"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-critical-breaks",
+      "name": "Check for Critical Reconciliation Breaks",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $vars.SLACK_OPS_CHANNEL }}",
+        "text": "🔴 CRITICAL RECONCILIATION BREAKS\n• Total Breaks: {{ $json.summary.breaks_found }}\n• Critical Breaks: {{ $json.summary.breaks_by_severity.critical }}\n• High Severity: {{ $json.summary.breaks_by_severity.high }}\n• Affected Symbols: {{ $json.breaks.filter(b => b.break_severity === 'critical').map(b => b.symbol).join(', ') }}\n• Immediate investigation required!\n• Time: {{ $json.reconciliation_date }}",
+        "additionalFields": {}
+      },
+      "id": "alert-critical-breaks",
+      "name": "Alert Ops Team on Critical Breaks",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "reconciliation_breaks",
+        "columns": {
+          "break_id": "={{ $json.break_id }}",
+          "symbol": "={{ $json.symbol }}",
+          "portfolio_id": "={{ $json.portfolio }}",
+          "break_type": "={{ $json.break_type }}",
+          "break_severity": "={{ $json.break_severity }}",
+          "internal_quantity": "={{ $json.internal_quantity }}",
+          "broker_quantity": "={{ $json.broker_quantity }}",
+          "quantity_difference": "={{ $json.quantity_difference }}",
+          "market_value_difference": "={{ $json.market_value_difference }}",
+          "description": "={{ $json.description }}",
+          "reconciliation_date": "={{ $json.reconciliation_date }}",
+          "status": "OPEN",
+          "assigned_to": "={{ $json.break_severity === 'critical' ? 'SENIOR_TRADER' : 'OPERATIONS' }}"
+        },
+        "additionalFields": {}
+      },
+      "id": "store-reconciliation-breaks",
+      "name": "Store Reconciliation Breaks",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        900,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Auto-resolve simple breaks (FX differences, rounding errors)\nconst autoResolveBreaks = (reconciliation) => {\n  const autoResolved = [];\n  const remainingBreaks = [];\n  \n  reconciliation.breaks.forEach(breakItem => {\n    // Criteria for auto-resolution\n    const isSmallQuantityBreak = Math.abs(breakItem.quantity_difference) <= 10;\n    const isSmallValueBreak = Math.abs(breakItem.market_value_difference) <= 100;\n    const isFxRounding = breakItem.description.includes('FX') || breakItem.description.includes('rounding');\n    \n    if ((isSmallQuantityBreak && isSmallValueBreak) || isFxRounding) {\n      autoResolved.push({\n        ...breakItem,\n        resolution: 'AUTO_RESOLVED',\n        resolution_reason: 'Small discrepancy within tolerance limits',\n        resolved_at: new Date().toISOString(),\n        resolved_by: 'SYSTEM_AUTO'\n      });\n    } else {\n      remainingBreaks.push(breakItem);\n    }\n  });\n  \n  return {\n    ...reconciliation,\n    breaks: remainingBreaks,\n    auto_resolved: autoResolved,\n    resolution_summary: {\n      total_breaks: reconciliation.breaks.length,\n      auto_resolved: autoResolved.length,\n      remaining_breaks: remainingBreaks.length,\n      auto_resolution_rate: (autoResolved.length / reconciliation.breaks.length) * 100\n    }\n  };\n};\n\nconst reconciliation = items[0].json;\nconst resolvedReconciliation = autoResolveBreaks(reconciliation);\n\nreturn [{ json: resolvedReconciliation }];"
+      },
+      "id": "auto-resolve-breaks",
+      "name": "Auto-Resolve Simple Breaks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "table": "reconciliation_breaks",
+        "columns": {
+          "status": "RESOLVED",
+          "resolution_reason": "={{ $json.resolution_reason }}",
+          "resolved_at": "={{ $json.resolved_at }}",
+          "resolved_by": "={{ $json.resolved_by }}"
+        },
+        "additionalFields": {
+          "where": {
+            "conditions": [
+              {
+                "column": "break_id",
+                "value": "={{ $json.break_id }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "update-resolved-breaks",
+      "name": "Update Auto-Resolved Breaks Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "Portfolio Reconciliation Summary - {{ $now }}",
+        "body": "Daily Portfolio Reconciliation Report:\n\nSummary:\n• Internal Positions: {{ $json.summary.total_internal_positions }}\n• Broker Positions: {{ $json.summary.total_broker_positions }}\n• Matched Positions: {{ $json.summary.matched_positions }}\n• Total Breaks: {{ $json.summary.breaks_found }}\n• Auto-Resolved: {{ $json.resolution_summary.auto_resolved }}\n• Remaining Breaks: {{ $json.resolution_summary.remaining_breaks }}\n\nBreak Severity:\n• Critical: {{ $json.summary.breaks_by_severity.critical }}\n• High: {{ $json.summary.breaks_by_severity.high }}\n• Medium: {{ $json.summary.breaks_by_severity.medium }}\n• Low: {{ $json.summary.breaks_by_severity.low }}\n\nCritical Breaks Requiring Attention:\n{{ $json.breaks.filter(b => b.break_severity === 'critical').map(b => `• ${b.symbol}: ${b.description}`).join('\\n') }}\n\nGenerated: {{ $json.reconciliation_date }}",
+        "to": "={{ $vars.OPERATIONS_TEAM_EMAIL }}",
+        "additionalFields": {}
+      },
+      "id": "email-reconciliation-report",
+      "name": "Email Reconciliation Summary Report",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "End-of-Day Reconciliation Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Internal Portfolio Positions",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Prime Broker Positions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Internal Portfolio Positions": {
+      "main": [
+        [
+          {
+            "node": "Reconcile Positions & Identify Breaks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Prime Broker Positions": {
+      "main": [
+        [
+          {
+            "node": "Reconcile Positions & Identify Breaks",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Reconcile Positions & Identify Breaks": {
+      "main": [
+        [
+          {
+            "node": "Check for Critical Reconciliation Breaks",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Store Reconciliation Breaks",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Auto-Resolve Simple Breaks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check for Critical Reconciliation Breaks": {
+      "main": [
+        [
+          {
+            "node": "Alert Ops Team on Critical Breaks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Reconciliation Breaks": {
+      "main": [
+        [
+          {
+            "node": "Auto-Resolve Simple Breaks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto-Resolve Simple Breaks": {
+      "main": [
+        [
+          {
+            "node": "Update Resolved Breaks Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Email Reconciliation Summary Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,304 @@
+{
+  "name": "Quantitative Factor Model Data Pipeline",
+  "version": 1,
+  "tags": ["factor-models", "quantitative-research", "data-aggregation", "risk-factors"],
+  "description": "Aggregates and processes multi-source data for quantitative factor models including fundamental, macroeconomic, and technical factors",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "hour": [
+            "6"
+          ],
+          "minute": [
+            "0"
+          ]
+        }
+      },
+      "id": "daily-factor-trigger",
+      "name": "Daily Factor Data Update Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT DISTINCT symbol FROM universe_constituents WHERE active = true AND inclusion_date <= CURRENT_DATE",
+        "additionalFields": {}
+      },
+      "id": "fetch-universe-symbols",
+      "name": "Fetch Investment Universe Symbols",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.FUNDAMENTAL_API_URL }}/v1/fundamentals",
+        "method": "GET",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $vars.FUNDAMENTAL_API_KEY }}"
+            }
+          ]
+        },
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "symbols",
+              "value": "={{ items.map(item => item.json.symbol).slice(0, 100).join(',') }}"
+            },
+            {
+              "name": "fields",
+              "value": "pe_ratio,price_to_book,price_to_sales,ev_to_ebitda,debt_to_equity,return_on_equity,earning_yield,market_cap"
+            }
+          ]
+        }
+      },
+      "id": "fetch-fundamental-data",
+      "name": "Fetch Fundamental Data (Value Factors)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.MACRO_API_URL }}/v1/indicators",
+        "method": "GET",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $vars.MACRO_API_KEY }}"
+            }
+          ]
+        },
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "indicators",
+              "value": "GDP,CPI,UNEMPLOYMENT,INTEREST_RATES,CONSUMER_SENTIMENT"
+            },
+            {
+              "name": "period",
+              "value": "monthly"
+            },
+            {
+              "name": "start_date",
+              "value": "={{ new Date(Date.now() - 365 * 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0] }}"
+            }
+          ]
+        }
+      },
+      "id": "fetch-macro-data",
+      "name": "Fetch Macroeconomic Indicators",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        680,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    symbol,\n    date,\n    close_price,\n    volume,\n    LAG(close_price, 1) OVER (PARTITION BY symbol ORDER BY date) as prev_close,\n    LAG(close_price, 21) OVER (PARTITION BY symbol ORDER BY date) as month_ago_price,\n    LAG(close_price, 252) OVER (PARTITION BY symbol ORDER BY date) as year_ago_price\nFROM historical_prices \nWHERE symbol IN (SELECT symbol FROM universe_constituents WHERE active = true)\nAND date >= CURRENT_DATE - INTERVAL '2 years'\nORDER BY symbol, date",
+        "additionalFields": {}
+      },
+      "id": "fetch-price-momentum",
+      "name": "Fetch Price Data for Momentum Factors",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        680,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Calculate factor exposures and scores\nconst calculateFactorExposures = (fundamentalData, priceData, macroData) => {\n  const factorExposures = [];\n  \n  // Group price data by symbol\n  const priceBySymbol = {};\n  priceData.forEach(item => {\n    if (!priceBySymbol[item.symbol]) {\n      priceBySymbol[item.symbol] = [];\n    }\n    priceBySymbol[item.symbol].push(item);\n  });\n  \n  // Calculate factors for each symbol\n  fundamentalData.forEach(stock => {\n    const symbolPrices = priceBySymbol[stock.symbol];\n    if (!symbolPrices || symbolPrices.length < 252) continue;\n    \n    const latestPrice = symbolPrices[symbolPrices.length - 1];\n    const factors = {\n      symbol: stock.symbol,\n      date: new Date().toISOString().split('T')[0],\n      \n      // Value Factors\n      value_score: calculateValueScore(stock),\n      \n      // Momentum Factors\n      momentum_1m: calculateMomentum(symbolPrices, 21),\n      momentum_3m: calculateMomentum(symbolPrices, 63),\n      momentum_12m: calculateMomentum(symbolPrices, 252),\n      \n      // Quality Factors\n      quality_score: calculateQualityScore(stock),\n      \n      // Size Factor\n      size_factor: calculateSizeFactor(stock.market_cap),\n      \n      // Volatility Factor\n      volatility_score: calculateVolatility(symbolPrices),\n      \n      // Technical Factors\n      rsi_14d: calculateRSI(symbolPrices, 14),\n      macd_signal: calculateMACD(symbolPrices),\n      \n      calculation_timestamp: new Date().toISOString(),\n      data_quality: assessDataQuality(stock, symbolPrices)\n    };\n    \n    factorExposures.push(factors);\n  });\n  \n  return factorExposures;\n};\n\nconst calculateValueScore = (stock) => {\n  const factors = [];\n  \n  if (stock.pe_ratio && stock.pe_ratio > 0) {\n    factors.push(1 / stock.pe_ratio); // Earnings yield\n  }\n  \n  if (stock.price_to_book && stock.price_to_book > 0) {\n    factors.push(1 / stock.price_to_book);\n  }\n  \n  if (stock.ev_to_ebitda && stock.ev_to_ebitda > 0) {\n    factors.push(1 / stock.ev_to_ebitda);\n  }\n  \n  return factors.length > 0 ? factors.reduce((a, b) => a + b, 0) / factors.length : 0;\n};\n\nconst calculateMomentum = (prices, lookback) => {\n  if (prices.length < lookback) return 0;\n  \n  const currentPrice = prices[prices.length - 1].close_price;\n  const pastPrice = prices[prices.length - lookback].close_price;\n  \n  return pastPrice > 0 ? (currentPrice - pastPrice) / pastPrice : 0;\n};\n\nconst calculateQualityScore = (stock) => {\n  let score = 0;\n  let factors = 0;\n  \n  if (stock.return_on_equity) {\n    score += stock.return_on_equity;\n    factors++;\n  }\n  \n  if (stock.debt_to_equity) {\n    score += 1 / (1 + stock.debt_to_equity); // Inverse of debt ratio\n    factors++;\n  }\n  \n  return factors > 0 ? score / factors : 0;\n};\n\nconst calculateSizeFactor = (marketCap) => {\n  return Math.log(marketCap || 1e9);\n};\n\nconst calculateVolatility = (prices) => {\n  const returns = [];\n  for (let i = 1; i < prices.length; i++) {\n    if (prices[i-1].close_price > 0) {\n      returns.push((prices[i].close_price - prices[i-1].close_price) / prices[i-1].close_price);\n    }\n  }\n  \n  const mean = returns.reduce((a, b) => a + b, 0) / returns.length;\n  const variance = returns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / returns.length;\n  \n  return Math.sqrt(variance * 252); // Annualized volatility\n};\n\nconst calculateRSI = (prices, period) => {\n  // Simplified RSI calculation\n  const gains = [];\n  const losses = [];\n  \n  for (let i = 1; i < Math.min(prices.length, period + 1); i++) {\n    const change = prices[i].close_price - prices[i-1].close_price;\n    if (change > 0) gains.push(change);\n    else losses.push(Math.abs(change));\n  }\n  \n  const avgGain = gains.reduce((a, b) => a + b, 0) / period;\n  const avgLoss = losses.reduce((a, b) => a + b, 0) / period;\n  \n  return avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));\n};\n\nconst calculateMACD = (prices) => {\n  // Simplified MACD signal\n  if (prices.length < 26) return 0;\n  \n  const ema12 = calculateEMA(prices, 12);\n  const ema26 = calculateEMA(prices, 26);\n  \n  return ema12 - ema26;\n};\n\nconst calculateEMA = (prices, period) => {\n  const multiplier = 2 / (period + 1);\n  let ema = prices[0].close_price;\n  \n  for (let i = 1; i < prices.length; i++) {\n    ema = (prices[i].close_price - ema) * multiplier + ema;\n  }\n  \n  return ema;\n};\n\nconst assessDataQuality = (stock, prices) => {\n  let score = 100;\n  \n  // Penalize missing fundamental data\n  if (!stock.pe_ratio) score -= 20;\n  if (!stock.price_to_book) score -= 20;\n  if (!stock.return_on_equity) score -= 15;\n  \n  // Penalize insufficient price history\n  if (prices.length < 252) score -= 30;\n  \n  return Math.max(0, score);\n};\n\nconst fundamentalData = items[0].json;\nconst priceData = items[1].json;\nconst macroData = items[2]?.json || [];\n\nconst factorExposures = calculateFactorExposures(fundamentalData, priceData, macroData);\n\nreturn factorExposures.map(exposure => ({ json: exposure }));"
+      },
+      "id": "calculate-factors",
+      "name": "Calculate Factor Exposures & Scores",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "table": "factor_exposures",
+        "columns": {
+          "symbol": "={{ $json.symbol }}",
+          "calculation_date": "={{ $json.date }}",
+          "value_score": "={{ $json.value_score }}",
+          "momentum_1m": "={{ $json.momentum_1m }}",
+          "momentum_3m": "={{ $json.momentum_3m }}",
+          "momentum_12m": "={{ $json.momentum_12m }}",
+          "quality_score": "={{ $json.quality_score }}",
+          "size_factor": "={{ $json.size_factor }}",
+          "volatility_score": "={{ $json.volatility_score }}",
+          "rsi_14d": "={{ $json.rsi_14d }}",
+          "macd_signal": "={{ $json.macd_signal }}",
+          "data_quality": "={{ $json.data_quality }}",
+          "calculation_timestamp": "={{ $json.calculation_timestamp }}"
+        },
+        "additionalFields": {
+          "updateKey": "symbol,calculation_date"
+        }
+      },
+      "id": "store-factor-data",
+      "name": "Store Factor Exposure Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate factor analytics and insights\nconst generateFactorAnalytics = (factorExposures) => {\n  const analytics = {\n    analytics_date: new Date().toISOString().split('T')[0],\n    total_symbols: factorExposures.length,\n    factor_statistics: {},\n    quality_metrics: {},\n    factor_correlations: {},\n    top_performers_by_factor: {}\n  };\n  \n  // Calculate statistics for each factor\n  const factors = ['value_score', 'momentum_12m', 'quality_score', 'size_factor', 'volatility_score'];\n  \n  factors.forEach(factor => {\n    const values = factorExposures.map(e => e[factor]).filter(v => v !== undefined);\n    if (values.length > 0) {\n      analytics.factor_statistics[factor] = {\n        mean: values.reduce((a, b) => a + b, 0) / values.length,\n        std_dev: calculateStdDev(values),\n        min: Math.min(...values),\n        max: Math.max(...values),\n        coverage: (values.length / factorExposures.length) * 100\n      };\n    }\n  });\n  \n  // Data quality metrics\n  analytics.quality_metrics = {\n    average_data_quality: factorExposures.reduce((sum, e) => sum + e.data_quality, 0) / factorExposures.length,\n    high_quality_coverage: (factorExposures.filter(e => e.data_quality >= 80).length / factorExposures.length) * 100,\n    low_quality_count: factorExposures.filter(e => e.data_quality < 50).length\n  };\n  \n  // Identify top performers by factor\n  factors.forEach(factor => {\n    const topPerformers = factorExposures\n      .filter(e => e[factor] !== undefined)\n      .sort((a, b) => b[factor] - a[factor])\n      .slice(0, 10)\n      .map(e => ({ symbol: e.symbol, score: e[factor] }));\n    \n    analytics.top_performers_by_factor[factor] = topPerformers;\n  });\n  \n  return analytics;\n};\n\nconst calculateStdDev = (values) => {\n  const mean = values.reduce((a, b) => a + b, 0) / values.length;\n  const variance = values.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / values.length;\n  return Math.sqrt(variance);\n};\n\nconst factorExposures = items.map(item => item.json);\nconst analytics = generateFactorAnalytics(factorExposures);\n\nreturn [{ json: analytics }];"
+      },
+      "id": "generate-analytics",
+      "name": "Generate Factor Analytics Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "Factor Model Data Update - {{ $now }}",
+        "body": "Quantitative Factor Model Data Update:\n\nCoverage Summary:\n• Total Symbols: {{ $json.total_symbols }}\n• Average Data Quality: {{ $json.quality_metrics.average_data_quality.toFixed(1) }}%\n• High Quality Coverage: {{ $json.quality_metrics.high_quality_coverage.toFixed(1) }}%\n\nFactor Statistics:\n{{ Object.entries($json.factor_statistics).map(([factor, stats]) => `• ${factor}: Mean=${stats.mean.toFixed(4)}, StdDev=${stats.std_dev.toFixed(4)}, Coverage=${stats.coverage.toFixed(1)}%`).join('\\n') }}\n\nTop Value Stocks:\n{{ $json.top_performers_by_factor.value_score.slice(0, 5).map(stock => `• ${stock.symbol}: ${stock.score.toFixed(4)}`).join('\\n') }}\n\nGenerated: {{ $json.analytics_date }}",
+        "to": "={{ $vars.QUANT_RESEARCH_TEAM_EMAIL }}",
+        "additionalFields": {}
+      },
+      "id": "email-factor-update",
+      "name": "Email Factor Data Update",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Daily Factor Data Update Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Investment Universe Symbols",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Investment Universe Symbols": {
+      "main": [
+        [
+          {
+            "node": "Fetch Fundamental Data (Value Factors)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Price Data for Momentum Factors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Fundamental Data (Value Factors)": {
+      "main": [
+        [
+          {
+            "node": "Calculate Factor Exposures & Scores",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Macroeconomic Indicators": {
+      "main": [
+        [
+          {
+            "node": "Calculate Factor Exposures & Scores",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Fetch Price Data for Momentum Factors": {
+      "main": [
+        [
+          {
+            "node": "Calculate Factor Exposures & Scores",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Calculate Factor Exposures & Scores": {
+      "main": [
+        [
+          {
+            "node": "Store Factor Exposure Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Factor Analytics Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Factor Analytics Report": {
+      "main": [
+        [
+          {
+            "node": "Email Factor Data Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

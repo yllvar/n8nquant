@@ -1,0 +1,336 @@
+{
+  "name": "Quant Strategy CI/CD Pipeline",
+  "version": 1,
+  "tags": ["ci-cd", "strategy", "deployment", "testing", "research"],
+  "description": "Automated CI/CD pipeline for quantitative strategies with testing, validation, and deployment",
+  "nodes": [
+    {
+      "parameters": {
+        "events": [
+          "push"
+        ],
+        "path": "github-webhook",
+        "options": {
+          "responseMode": "lastNode"
+        }
+      },
+      "id": "github-webhook",
+      "name": "GitHub Push Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ],
+      "webhookId": "strategy-deployment-pipeline"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parse GitHub push event and extract strategy information\nconst githubEvent = $json;\n\nif (githubEvent.ref !== 'refs/heads/main' && !githubEvent.ref.includes('release')) {\n  return [{ json: { message: 'Skipping non-main branch push', should_proceed: false } }];\n}\n\nconst strategyInfo = {\n  strategy_name: githubEvent.repository.name,\n  commit_hash: githubEvent.after,\n  branch: githubEvent.ref.replace('refs/heads/', ''),\n  author: githubEvent.pusher.name,\n  files_changed: githubEvent.commits.flatMap(commit => commit.added.concat(commit.modified, commit.removed)).filter(Boolean),\n  commit_message: githubEvent.head_commit.message,\n  repository_url: githubEvent.repository.clone_url,\n  event_timestamp: new Date().toISOString()\n};\n\nreturn [{ json: { ...strategyInfo, should_proceed: true } }];"
+      },
+      "id": "parse-github-event",
+      "name": "Parse GitHub Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-should-proceed",
+              "leftValue": "={{ $json.should_proceed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "isTrue"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-proceed-condition",
+      "name": "Check if Deployment Should Proceed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "cd /tmp/{{ $json.strategy_name }} && python -m pytest tests/ --junitxml=pytest.xml",
+        "additionalParameters": {
+          "shell": "bash"
+        }
+      },
+      "id": "run-unit-tests",
+      "name": "Run Unit Tests",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-test-success",
+              "leftValue": "={{ $json.exitCode }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-test-results",
+      "name": "Check Unit Test Results",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "cd /tmp/{{ $json.strategy_name }} && docker build -t quant-strategy:{{ $json.commit_hash }} .",
+        "additionalParameters": {
+          "shell": "bash"
+        }
+      },
+      "id": "build-docker-image",
+      "name": "Build Docker Image",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "docker run --rm -e DB_HOST={{ $vars.DB_HOST }} -e API_KEY={{ $vars.API_KEY }} quant-strategy:{{ $json.commit_hash }} python backtest.py --start-date 2023-01-01 --end-date 2023-12-31",
+        "additionalParameters": {
+          "shell": "bash"
+        }
+      },
+      "id": "run-backtest",
+      "name": "Run Backtest Validation",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "topic": "strategy-deployment",
+        "message": {
+          "strategy": "={{ $json.strategy_name }}",
+          "version": "={{ $json.commit_hash }}",
+          "status": "ready-for-deployment",
+          "deployment_timestamp": "={{ new Date().toISOString() }}"
+        },
+        "additionalFields": {}
+      },
+      "id": "publish-deployment-ready",
+      "name": "Publish Deployment Ready Event",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        1780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate deployment summary\nconst summary = {\n  strategy_name: $json.strategy_name,\n  commit_hash: $json.commit_hash,\n  branch: $json.branch,\n  author: $json.author,\n  status: 'DEPLOYMENT_READY',\n  deployment_timestamp: new Date().toISOString(),\n  deployment_pipeline: 'CI/CD_SUCCESSFUL'\n};\nreturn [{ json: summary }];"
+      },
+      "id": "generate-deployment-summary",
+      "name": "Generate Deployment Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $vars.SLACK_RESEARCH_CHANNEL }}",
+        "text": "🚀 STRATEGY DEPLOYMENT READY\n• Strategy: {{ $json.strategy_name }}\n• Commit: {{ $json.commit_hash.substring(0, 7) }}\n• Author: {{ $json.author }}\n• Time: {{ $json.deployment_timestamp }}\n• Status: CI/CD Pipeline Successful\n• Next: Awaiting production deployment approval",
+        "additionalFields": {}
+      },
+      "id": "send-deployment-alert",
+      "name": "Send Deployment Ready Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        1780,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "strategy_deployments",
+        "columns": {
+          "strategy_name": "={{ $json.strategy_name }}",
+          "commit_hash": "={{ $json.commit_hash }}",
+          "branch": "={{ $json.branch }}",
+          "author": "={{ $json.author }}",
+          "status": "={{ $json.status }}",
+          "deployment_timestamp": "={{ $json.deployment_timestamp }}",
+          "pipeline_status": "={{ $json.deployment_pipeline }}"
+        },
+        "additionalFields": {}
+      },
+      "id": "log-deployment",
+      "name": "Log Deployment Event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        500
+      ]
+    }
+  ],
+  "connections": {
+    "GitHub Push Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse GitHub Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse GitHub Event": {
+      "main": [
+        [
+          {
+            "node": "Check if Deployment Should Proceed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if Deployment Should Proceed": {
+      "main": [
+        [
+          {
+            "node": "Run Unit Tests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Unit Tests": {
+      "main": [
+        [
+          {
+            "node": "Check Unit Test Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Unit Test Results": {
+      "main": [
+        [
+          {
+            "node": "Build Docker Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Docker Image": {
+      "main": [
+        [
+          {
+            "node": "Run Backtest Validation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Backtest Validation": {
+      "main": [
+        [
+          {
+            "node": "Publish Deployment Ready Event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Deployment Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish Deployment Ready Event": {
+      "main": [
+        [
+          {
+            "node": "Generate Deployment Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Deployment Summary": {
+      "main": [
+        [
+          {
+            "node": "Send Deployment Ready Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

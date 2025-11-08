@@ -1,0 +1,408 @@
+{
+  "name": "Corporate Actions Automation Engine",
+  "version": 1,
+  "tags": ["corporate-actions", "corporate-events", "position-management", "dividends"],
+  "description": "Automates processing of corporate actions including dividends, stock splits, mergers, and spin-offs with position updates and cash reconciliation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "hour": [
+            "7,12,17"
+          ],
+          "minute": [
+            "0"
+          ]
+        }
+      },
+      "id": "corporate-actions-trigger",
+      "name": "Corporate Actions Monitoring Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.CORP_ACTIONS_API_URL }}/v1/announcements",
+        "method": "GET",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $vars.CORP_ACTIONS_API_KEY }}"
+            },
+            {
+              "name": "X-Client-ID",
+              "value": "={{ $vars.FIRM_ID }}"
+            }
+          ]
+        },
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "from_date",
+              "value": "={{ new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().split('T')[0] }}"
+            },
+            {
+              "name": "to_date",
+              "value": "={{ new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0] }}"
+            },
+            {
+              "name": "action_types",
+              "value": "DIVIDEND,SPLIT,MERGER,SPINOFF,RIGHTS"
+            }
+          ]
+        }
+      },
+      "id": "fetch-corp-actions",
+      "name": "Fetch Corporate Actions Announcements",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT DISTINCT symbol FROM portfolio_positions WHERE quantity != 0 AND active = true",
+        "additionalFields": {}
+      },
+      "id": "fetch-portfolio-symbols",
+      "name": "Fetch Active Portfolio Symbols",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Filter corporate actions for portfolio holdings\nconst filterRelevantActions = (corpActions, portfolioSymbols) => {\n  const portfolioSymbolSet = new Set(portfolioSymbols.map(p => p.symbol));\n  \n  return corpActions.filter(action => {\n    return portfolioSymbolSet.has(action.symbol) && \n           action.effective_date && \n           action.status === 'ANNOUNCED';\n  }).map(action => ({\n    ...action,\n    days_to_effective: Math.floor((new Date(action.effective_date) - new Date()) / (1000 * 60 * 60 * 24)),\n    requires_action: determineRequiredAction(action),\n    priority: determinePriority(action)\n  }));\n};\n\nconst determineRequiredAction = (action) => {\n  switch (action.action_type) {\n    case 'DIVIDEND':\n      return 'CASH_RECONCILIATION';\n    case 'SPLIT':\n      return 'POSITION_ADJUSTMENT';\n    case 'MERGER':\n      return 'POSITION_REPLACEMENT';\n    case 'SPINOFF':\n      return 'POSITION_ADDITION';\n    case 'RIGHTS':\n      return 'RIGHTS_EXERCISE_DECISION';\n    default:\n      return 'MANUAL_REVIEW';\n  }\n};\n\nconst determinePriority = (action) => {\n  const daysToEffective = Math.floor((new Date(action.effective_date) - new Date()) / (1000 * 60 * 60 * 24));\n  \n  if (daysToEffective <= 1) return 'CRITICAL';\n  if (daysToEffective <= 3) return 'HIGH';\n  if (daysToEffective <= 7) return 'MEDIUM';\n  return 'LOW';\n};\n\nconst corpActions = Array.isArray(items[0].json) ? items[0].json : [items[0].json];\nconst portfolioSymbols = items[1].json;\n\nconst relevantActions = filterRelevantActions(corpActions, portfolioSymbols);\n\nreturn relevantActions.map(action => ({ json: action }));"
+      },
+      "id": "filter-relevant-actions",
+      "name": "Filter Relevant Corporate Actions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-dividend-actions",
+              "leftValue": "={{ $json.action_type }}",
+              "rightValue": "DIVIDEND",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-dividend-actions",
+      "name": "Identify Dividend Actions",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process dividend payments\nconst processDividendActions = (dividendActions) => {\n  const dividendPayments = [];\n  \n  dividendActions.forEach(action => {\n    // Calculate expected dividend payment\n    const payment = {\n      corporate_action_id: action.id,\n      symbol: action.symbol,\n      action_type: action.action_type,\n      dividend_amount: action.dividend_amount,\n      ex_dividend_date: action.ex_dividend_date,\n      payment_date: action.payment_date,\n      record_date: action.record_date,\n      currency: action.currency || 'USD',\n      status: 'PENDING',\n      calculation_timestamp: new Date().toISOString()\n    };\n    \n    dividendPayments.push(payment);\n  });\n  \n  return dividendPayments;\n};\n\nconst dividendActions = items.map(item => item.json);\nconst dividendPayments = processDividendActions(dividendActions);\n\nreturn dividendPayments.map(payment => ({ json: payment }));"
+      },
+      "id": "process-dividends",
+      "name": "Process Dividend Payments",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "INSERT INTO dividend_payments (\n  corporate_action_id, symbol, action_type, dividend_amount, \n  ex_dividend_date, payment_date, record_date, currency, status, calculation_timestamp\n) VALUES (\n  {{ $json.corporate_action_id }}, {{ $json.symbol }}, {{ $json.action_type }}, \n  {{ $json.dividend_amount }}, {{ $json.ex_dividend_date }}, {{ $json.payment_date }}, \n  {{ $json.record_date }}, {{ $json.currency }}, {{ $json.status }}, {{ $json.calculation_timestamp }}\n)",
+        "additionalFields": {}
+      },
+      "id": "store-dividend-payments",
+      "name": "Store Dividend Payment Records",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-stock-splits",
+              "leftValue": "={{ $json.action_type }}",
+              "rightValue": "SPLIT",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-stock-splits",
+      "name": "Identify Stock Split Actions",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process stock splits\nconst processStockSplits = (splitActions) => {\n  const splitAdjustments = [];\n  \n  splitActions.forEach(action => {\n    const [from, to] = action.split_ratio.split(':').map(Number);\n    const adjustmentFactor = to / from;\n    \n    const adjustment = {\n      corporate_action_id: action.id,\n      symbol: action.symbol,\n      action_type: action.action_type,\n      split_ratio: action.split_ratio,\n      adjustment_factor: adjustmentFactor,\n      effective_date: action.effective_date,\n      old_symbol: action.symbol,\n      new_symbol: action.new_symbol || action.symbol,\n      status: 'PENDING_ADJUSTMENT',\n      calculation_timestamp: new Date().toISOString()\n    };\n    \n    splitAdjustments.push(adjustment);\n  });\n  \n  return splitAdjustments;\n};\n\nconst splitActions = items.map(item => item.json);\nconst splitAdjustments = processStockSplits(splitActions);\n\nreturn splitAdjustments.map(adjustment => ({ json: adjustment }));"
+      },
+      "id": "process-splits",
+      "name": "Process Stock Splits",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "UPDATE portfolio_positions \nSET quantity = quantity * {{ $json.adjustment_factor }},\n    average_cost = average_cost / {{ $json.adjustment_factor }},\n    symbol = {{ $json.new_symbol }},\n    last_adjustment_date = CURRENT_DATE,\n    adjustment_reason = 'STOCK_SPLIT'\nWHERE symbol = {{ $json.old_symbol }}\nAND active = true",
+        "additionalFields": {}
+      },
+      "id": "adjust-split-positions",
+      "name": "Adjust Positions for Stock Splits",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate corporate actions summary\nconst generateSummary = (relevantActions, processedDividends, processedSplits) => {\n  const summary = {\n    summary_timestamp: new Date().toISOString(),\n    total_actions: relevantActions.length,\n    actions_by_type: {},\n    critical_actions: relevantActions.filter(a => a.priority === 'CRITICAL').length,\n    pending_processing: processedDividends.length + processedSplits.length,\n    action_details: relevantActions.map(action => ({\n      symbol: action.symbol,\n      action_type: action.action_type,\n      effective_date: action.effective_date,\n      priority: action.priority,\n      requires_action: action.requires_action,\n      status: 'PROCESSED'\n    }))\n  };\n  \n  // Count by action type\n  relevantActions.forEach(action => {\n    summary.actions_by_type[action.action_type] = (summary.actions_by_type[action.action_type] || 0) + 1;\n  });\n  \n  return summary;\n};\n\nconst relevantActions = items[0].json;\nconst processedDividends = items[1]?.json || [];\nconst processedSplits = items[2]?.json || [];\n\nconst summary = generateSummary(relevantActions, processedDividends, processedSplits);\n\nreturn [{ json: summary }];"
+      },
+      "id": "generate-summary",
+      "name": "Generate Corporate Actions Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "Corporate Actions Daily Summary - {{ $now }}",
+        "body": "Corporate Actions Processing Summary:\n\n• Total Actions: {{ $json.total_actions }}\n• Critical Actions: {{ $json.critical_actions }}\n• Pending Processing: {{ $json.pending_processing }}\n\nActions by Type:\n{{ Object.entries($json.actions_by_type).map(([type, count]) => `• ${type}: ${count}`).join('\\n') }}\n\nCritical Actions Requiring Attention:\n{{ $json.action_details.filter(a => a.priority === 'CRITICAL').map(a => `• ${a.symbol} - ${a.action_type} - ${a.requires_action}`).join('\\n') }}\n\nGenerated: {{ $json.summary_timestamp }}",
+        "to": "={{ $vars.OPERATIONS_TEAM_EMAIL }}",
+        "additionalFields": {}
+      },
+      "id": "email-corp-actions-summary",
+      "name": "Email Corporate Actions Summary",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 1,
+      "position": [
+        1780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $vars.SLACK_OPERATIONS_CHANNEL }}",
+        "text": "📋 Corporate Actions Alert\n• New actions detected: {{ items.length }}\n• Critical actions: {{ items.filter(i => i.json.priority === 'CRITICAL').length }}\n• Types: {{ [...new Set(items.map(i => i.json.action_type))].join(', ') }}\n• Review required for immediate actions",
+        "additionalFields": {}
+      },
+      "id": "slack-corp-actions-alert",
+      "name": "Slack Alert for New Corporate Actions",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        680,
+        700
+      ]
+    }
+  ],
+  "connections": {
+    "Corporate Actions Monitoring Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Corporate Actions Announcements",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Active Portfolio Symbols",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Corporate Actions Announcements": {
+      "main": [
+        [
+          {
+            "node": "Filter Relevant Corporate Actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Active Portfolio Symbols": {
+      "main": [
+        [
+          {
+            "node": "Filter Relevant Corporate Actions",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Filter Relevant Corporate Actions": {
+      "main": [
+        [
+          {
+            "node": "Check Dividend Actions",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Stock Split Actions",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack Alert for New Corporate Actions",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Corporate Actions Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Dividend Actions": {
+      "main": [
+        [
+          {
+            "node": "Process Dividend Payments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Dividend Payments": {
+      "main": [
+        [
+          {
+            "node": "Store Dividend Payment Records",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Corporate Actions Summary",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Check Stock Split Actions": {
+      "main": [
+        [
+          {
+            "node": "Process Stock Splits",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Stock Splits": {
+      "main": [
+        [
+          {
+            "node": "Adjust Positions for Stock Splits",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Corporate Actions Summary",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Generate Corporate Actions Summary": {
+      "main": [
+        [
+          {
+            "node": "Email Corporate Actions Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

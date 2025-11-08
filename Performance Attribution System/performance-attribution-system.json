@@ -1,0 +1,194 @@
+{
+  "name": "Daily Performance Attribution System",
+  "version": 1,
+  "tags": ["performance", "attribution", "alpha", "factor", "analysis"],
+  "description": "Calculates performance attribution by factors, sectors, and other dimensions to understand portfolio returns",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "hour": [
+            "18"
+          ],
+          "minute": [
+            "0"
+          ]
+        }
+      },
+      "id": "attribution-trigger",
+      "name": "Daily Performance Attribution Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    p.portfolio_id,\n    p.portfolio_name,\n    pos.symbol,\n    pos.quantity,\n    pos.average_cost,\n    pos.purchase_date,\n    i.sector,\n    i.industry,\n    i.market_cap,\n    md.price as current_price,\n    md.price_date\nFROM portfolios p\nJOIN positions pos ON p.portfolio_id = pos.portfolio_id\nJOIN instruments i ON pos.symbol = i.symbol\nJOIN market_data md ON pos.symbol = md.symbol\nWHERE p.active = true\nAND pos.quantity != 0\nAND md.price_date = CURRENT_DATE",
+        "additionalFields": {}
+      },
+      "id": "fetch-portfolio-data",
+      "name": "Fetch Portfolio Positions and Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    factor_name,\n    factor_return,\n    factor_loading,\n    symbol\nFROM factor_exposures \nWHERE factor_date = CURRENT_DATE\nAND symbol IN (SELECT DISTINCT symbol FROM positions WHERE quantity != 0)",
+        "additionalFields": {}
+      },
+      "id": "fetch-factor-data",
+      "name": "Fetch Factor Exposures Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Performance attribution calculation\nconst calculateAttribution = (portfolioData, factorData) => {\n  const attributionResults = [];\n  \n  // Group positions by portfolio\n  const portfolios = {};\n  portfolioData.forEach(pos => {\n    if (!portfolios[pos.portfolio_id]) {\n      portfolios[pos.portfolio_id] = {\n        portfolio_id: pos.portfolio_id,\n        portfolio_name: pos.portfolio_name,\n        positions: []\n      };\n    }\n    portfolios[pos.portfolio_id].positions.push(pos);\n  });\n  \n  // Calculate attribution for each portfolio\n  Object.values(portfolios).forEach(portfolio => {\n    const results = [];\n    \n    // Calculate sector and industry attribution\n    const sectorExposures = {};\n    portfolio.positions.forEach(pos => {\n      const marketValue = pos.quantity * pos.current_price;\n      if (!sectorExposures[pos.sector]) {\n        sectorExposures[pos.sector] = 0;\n      }\n      sectorExposures[pos.sector] += marketValue;\n    });\n    \n    // Calculate factor attribution\n    const factorContributions = {};\n    portfolio.positions.forEach(pos => {\n      const factorExposures = factorData.filter(f => f.symbol === pos.symbol);\n      factorExposures.forEach(factor => {\n        if (!factorContributions[factor.factor_name]) {\n          factorContributions[factor.factor_name] = 0;\n        }\n        const contribution = factor.factor_loading * factor.factor_return;\n        factorContributions[factor.factor_name] += contribution;\n      });\n    });\n    \n    // Add sector attributions\n    Object.entries(sectorExposures).forEach(([sector, exposure]) => {\n      results.push({\n        portfolio_id: portfolio.portfolio_id,\n        attribution_type: 'sector',\n        factor: sector,\n        contribution: exposure, // Simplified - would be actual P&L contribution\n        weight: exposure / portfolio.positions.reduce((sum, p) => sum + (p.quantity * p.current_price), 0)\n      });\n    });\n    \n    // Add factor attributions\n    Object.entries(factorContributions).forEach(([factor, contribution]) => {\n      results.push({\n        portfolio_id: portfolio.portfolio_id,\n        attribution_type: 'factor',\n        factor: factor,\n        contribution: contribution,\n        weight: null\n      });\n    });\n    \n    attributionResults.push({\n      portfolio_id: portfolio.portfolio_id,\n      portfolio_name: portfolio.portfolio_name,\n      attribution_results: results,\n      calculation_date: new Date().toISOString().split('T')[0],\n      calculation_method: 'factor_and_sector_attribution'\n    });\n  });\n  \n  return attributionResults;\n};\n\nconst portfolioData = items[0].json;\nconst factorData = items[1].json;\nconst attributionResults = calculateAttribution(portfolioData, factorData);\nreturn attributionResults.flatMap(result => \n  result.attribution_results.map(attr => ({\n    json: {\n      ...attr,\n      portfolio_name: result.portfolio_name,\n      calculation_date: result.calculation_date\n    }\n  }))\n);"
+      },
+      "id": "calculate-attribution",
+      "name": "Calculate Performance Attribution",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "performance_attribution",
+        "columns": {
+          "portfolio_id": "={{ $json.portfolio_id }}",
+          "portfolio_name": "={{ $json.portfolio_name }}",
+          "attribution_type": "={{ $json.attribution_type }}",
+          "factor": "={{ $json.factor }}",
+          "contribution": "={{ $json.contribution }}",
+          "weight": "={{ $json.weight }}",
+          "calculation_date": "={{ $json.calculation_date }}",
+          "attribution_method": "factor_and_sector"
+        },
+        "additionalFields": {}
+      },
+      "id": "store-attribution-results",
+      "name": "Store Attribution Results",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate attribution summary report\nconst generateSummary = (attributionResults) => {\n  const groupedResults = {};\n  attributionResults.forEach(item => {\n    if (!groupedResults[item.portfolio_name]) {\n      groupedResults[item.portfolio_name] = [];\n    }\n    groupedResults[item.portfolio_name].push(item);\n  });\n  \n  const summary = {\n    date: new Date().toISOString().split('T')[0],\n    portfolios_analyzed: Object.keys(groupedResults).length,\n    attribution_summary: Object.entries(groupedResults).map(([portfolio, results]) => {\n      const sectorContributions = results.filter(r => r.attribution_type === 'sector');\n      const factorContributions = results.filter(r => r.attribution_type === 'factor');\n      \n      return {\n        portfolio: portfolio,\n        top_sector_contributors: sectorContributions.sort((a, b) => b.contribution - a.contribution).slice(0, 3),\n        top_factor_contributors: factorContributions.sort((a, b) => b.contribution - a.contribution).slice(0, 3),\n        total_attribution: results.reduce((sum, r) => sum + r.contribution, 0)\n      };\n    }),\n    generation_timestamp: new Date().toISOString()\n  };\n  \n  return summary;\n};\n\nconst summary = generateSummary(items.map(item => item.json));\nreturn [{ json: summary }];"
+      },
+      "id": "generate-attribution-summary",
+      "name": "Generate Attribution Summary Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "Performance Attribution Report - {{ $json.date }}",
+        "body": "Performance Attribution Summary:\n• Portfolios Analyzed: {{ $json.portfolios_analyzed }}\n\nPortfolio Details:\n{{ $json.attribution_summary.map(port => `\n${port.portfolio}:\n  Top Sector Contributors: ${port.top_sector_contributors.map(s => `${s.factor} (${s.contribution.toFixed(2)})`).join(', ')}\n  Top Factor Contributors: ${port.top_factor_contributors.map(f => `${f.factor} (${f.contribution.toFixed(2)})`).join(', ')}\n  Total Attribution: ${port.total_attribution.toFixed(2)}\n`).join('\\n') }}\n\nGenerated: {{ $json.generation_timestamp }}",
+        "to": "={{ $vars.PORTFOLIO_MANAGERS_EMAIL }}",
+        "additionalFields": {}
+      },
+      "id": "email-attribution-report",
+      "name": "Email Attribution Report",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Daily Performance Attribution Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Portfolio Positions and Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Portfolio Positions and Data": {
+      "main": [
+        [
+          {
+            "node": "Calculate Performance Attribution",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Factor Exposures Data": {
+      "main": [
+        [
+          {
+            "node": "Calculate Performance Attribution",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Calculate Performance Attribution": {
+      "main": [
+        [
+          {
+            "node": "Store Attribution Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Attribution Results": {
+      "main": [
+        [
+          {
+            "node": "Generate Attribution Summary Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Attribution Summary Report": {
+      "main": [
+        [
+          {
+            "node": "Email Attribution Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

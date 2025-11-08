@@ -1,0 +1,276 @@
+{
+  "name": "Algorithmic Trading Signal Generation Engine",
+  "version": 1,
+  "tags": ["trading-signals", "algorithmic-trading", "execution", "real-time"],
+  "description": "Generates real-time trading signals using multiple quantitative strategies and routes them to execution systems with risk checks",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            1
+          ],
+          "hour": [
+            "9-16"
+          ],
+          "minute": [
+            "*"
+          ]
+        }
+      },
+      "id": "trading-hours-trigger",
+      "name": "Trading Hours Signal Trigger (1-min)",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    symbol,\n    close_price,\n    volume,\n    bid_price,\n    ask_price,\n    update_timestamp\nFROM market_data_real_time \nWHERE update_timestamp >= NOW() - INTERVAL '5 minutes'\nAND symbol IN ('SPY', 'QQQ', 'IWM', 'DIA', 'XLF', 'XLK')",
+        "additionalFields": {}
+      },
+      "id": "fetch-real-time-data",
+      "name": "Fetch Real-Time Market Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    symbol,\n    quantity,\n    average_cost,\n    unrealized_pnl,\n    position_limit\nFROM portfolio_positions \nWHERE symbol IN ('SPY', 'QQQ', 'IWM', 'DIA', 'XLF', 'XLK')\nAND active = true",
+        "additionalFields": {}
+      },
+      "id": "fetch-current-positions",
+      "name": "Fetch Current Portfolio Positions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Multi-strategy signal generation\nconst generateTradingSignals = (marketData, currentPositions) => {\n  const signals = [];\n  \n  // Convert positions to map for easy lookup\n  const positionMap = {};\n  currentPositions.forEach(position => {\n    positionMap[position.symbol] = position;\n  });\n  \n  marketData.forEach(asset => {\n    const symbol = asset.symbol;\n    const currentPosition = positionMap[symbol] || { quantity: 0, average_cost: 0 };\n    \n    // Strategy 1: Mean Reversion (Bollinger Bands)\n    const meanReversionSignal = generateMeanReversionSignal(asset, currentPosition);\n    \n    // Strategy 2: Momentum Breakout\n    const momentumSignal = generateMomentumSignal(asset, currentPosition);\n    \n    // Strategy 3: Statistical Arbitrage\n    const statArbSignal = generateStatArbSignal(asset, marketData, currentPosition);\n    \n    // Combine signals with weights\n    const combinedSignal = combineSignals(meanReversionSignal, momentumSignal, statArbSignal);\n    \n    if (Math.abs(combinedSignal.signal_strength) >= 0.3) { // Minimum threshold\n      signals.push({\n        signal_id: `SIG_${symbol}_${Date.now()}`,\n        symbol: symbol,\n        timestamp: new Date().toISOString(),\n        signal_type: combinedSignal.signal_strength > 0 ? 'LONG' : 'SHORT',\n        signal_strength: Math.abs(combinedSignal.signal_strength),\n        target_size: calculateTargetSize(combinedSignal, currentPosition, asset),\n        limit_price: calculateLimitPrice(asset, combinedSignal.signal_strength),\n        strategy_breakdown: {\n          mean_reversion: meanReversionSignal,\n          momentum: momentumSignal,\n          stat_arb: statArbSignal\n        },\n        current_position: currentPosition.quantity,\n        confidence_score: combinedSignal.confidence,\n        risk_parameters: calculateRiskParameters(asset, currentPosition)\n      });\n    }\n  });\n  \n  return signals;\n};\n\nconst generateMeanReversionSignal = (asset, position) => {\n  // Simplified Bollinger Bands strategy\n  const lookback = 20;\n  const currentPrice = asset.close_price;\n  \n  // In production, this would use historical data\n  const movingAverage = currentPrice * (1 + (Math.random() - 0.5) * 0.02);\n  const standardDeviation = currentPrice * 0.015;\n  \n  const upperBand = movingAverage + 2 * standardDeviation;\n  const lowerBand = movingAverage - 2 * standardDeviation;\n  \n  let signal = 0;\n  let confidence = 0;\n  \n  if (currentPrice > upperBand && position.quantity <= 0) {\n    signal = -0.6; // Strong sell signal\n    confidence = 0.8;\n  } else if (currentPrice < lowerBand && position.quantity >= 0) {\n    signal = 0.6; // Strong buy signal\n    confidence = 0.8;\n  } else if (currentPrice > movingAverage + standardDeviation && position.quantity > 0) {\n    signal = -0.3; // Moderate sell signal\n    confidence = 0.6;\n  } else if (currentPrice < movingAverage - standardDeviation && position.quantity < 0) {\n    signal = 0.3; // Moderate buy signal\n    confidence = 0.6;\n  }\n  \n  return { signal, confidence, strategy: 'mean_reversion' };\n};\n\nconst generateMomentumSignal = (asset, position) => {\n  // Simplified momentum strategy\n  const shortPeriod = 10;\n  const longPeriod = 30;\n  \n  // In production, this would use historical returns\n  const shortMomentum = (Math.random() - 0.5) * 0.1;\n  const longMomentum = (Math.random() - 0.5) * 0.05;\n  \n  let signal = 0;\n  let confidence = 0;\n  \n  if (shortMomentum > 0.02 && longMomentum > 0.01 && position.quantity <= 0) {\n    signal = 0.5; // Buy signal\n    confidence = 0.7;\n  } else if (shortMomentum < -0.02 && longMomentum < -0.01 && position.quantity >= 0) {\n    signal = -0.5; // Sell signal\n    confidence = 0.7;\n  }\n  \n  return { signal, confidence, strategy: 'momentum' };\n};\n\nconst generateStatArbSignal = (asset, marketData, position) => {\n  // Simplified statistical arbitrage (pairs trading)\n  // In production, this would use cointegrated pairs\n  const relatedAssets = marketData.filter(a => a.symbol !== asset.symbol);\n  \n  if (relatedAssets.length === 0) {\n    return { signal: 0, confidence: 0, strategy: 'stat_arb' };\n  }\n  \n  // Simple mean reversion against basket\n  const basketAvg = relatedAssets.reduce((sum, a) => sum + a.close_price, 0) / relatedAssets.length;\n  const zScore = (asset.close_price - basketAvg) / (asset.close_price * 0.02);\n  \n  let signal = 0;\n  let confidence = 0;\n  \n  if (zScore > 2 && position.quantity <= 0) {\n    signal = -0.4;\n    confidence = 0.6;\n  } else if (zScore < -2 && position.quantity >= 0) {\n    signal = 0.4;\n    confidence = 0.6;\n  }\n  \n  return { signal, confidence, strategy: 'stat_arb', z_score: zScore };\n};\n\nconst combineSignals = (mr, mom, sa) => {\n  const weights = { mr: 0.4, mom: 0.35, sa: 0.25 };\n  \n  const weightedSignal = mr.signal * weights.mr + mom.signal * weights.mom + sa.signal * weights.sa;\n  const weightedConfidence = mr.confidence * weights.mr + mom.confidence * weights.mom + sa.confidence * weights.sa;\n  \n  return {\n    signal_strength: weightedSignal,\n    confidence: weightedConfidence\n  };\n};\n\nconst calculateTargetSize = (signal, position, asset) => {\n  const baseSize = 1000; // shares\n  const maxPosition = 5000;\n  \n  let targetQuantity = Math.round(baseSize * signal.signal_strength);\n  \n  // Adjust for current position\n  if (signal.signal_strength > 0 && position.quantity < 0) {\n    // Cover short and go long\n    targetQuantity = Math.abs(position.quantity) + baseSize;\n  } else if (signal.signal_strength < 0 && position.quantity > 0) {\n    // Sell long and go short\n    targetQuantity = -position.quantity - baseSize;\n  }\n  \n  // Apply position limits\n  if (targetQuantity > maxPosition) targetQuantity = maxPosition;\n  if (targetQuantity < -maxPosition) targetQuantity = -maxPosition;\n  \n  return targetQuantity;\n};\n\nconst calculateLimitPrice = (asset, signalStrength) => {\n  const spread = asset.ask_price - asset.bid_price;\n  const midPrice = (asset.bid_price + asset.ask_price) / 2;\n  \n  if (signalStrength > 0) {\n    // Buy order - price at ask or slightly above for aggressive buys\n    return signalStrength > 0.5 ? asset.ask_price + spread * 0.1 : asset.ask_price;\n  } else {\n    // Sell order - price at bid or slightly below for aggressive sells\n    return signalStrength < -0.5 ? asset.bid_price - spread * 0.1 : asset.bid_price;\n  }\n};\n\nconst calculateRiskParameters = (asset, position) => ({\n  max_position_value: 100000,\n  stop_loss_pct: 0.02,\n  take_profit_pct: 0.04,\n  max_daily_loss: 5000,\n  position_size_limit: 5000\n});\n\nconst marketData = items[0].json;\nconst currentPositions = items[1].json;\n\nconst tradingSignals = generateTradingSignals(marketData, currentPositions);\n\nreturn tradingSignals.map(signal => ({ json: signal }));"
+      },
+      "id": "generate-signals",
+      "name": "Generate Multi-Strategy Trading Signals",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-signal-strength",
+              "leftValue": "={{ $json.signal_strength }}",
+              "rightValue": 0.5,
+              "operator": {
+                "type": "number",
+                "operation": "greaterThan"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-strong-signals",
+      "name": "Filter Strong Trading Signals",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "topic": "trading-signals",
+        "sendInputData": true,
+        "additionalFields": {}
+      },
+      "id": "publish-signals-kafka",
+      "name": "Publish Signals to Kafka (Execution)",
+      "type": "n8n-nodes-base.kafka",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "INSERT INTO trading_signals (\n  signal_id, symbol, timestamp, signal_type, signal_strength, \n  target_size, limit_price, strategy_breakdown, confidence_score\n) VALUES (\n  {{ $json.signal_id }}, {{ $json.symbol }}, {{ $json.timestamp }}, \n  {{ $json.signal_type }}, {{ $json.signal_strength }}, {{ $json.target_size }}, \n  {{ $json.limit_price }}, {{ $json.strategy_breakdown }}, {{ $json.confidence_score }}\n)",
+        "additionalFields": {}
+      },
+      "id": "store-signals-db",
+      "name": "Store Signals in Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $vars.SLACK_TRADING_CHANNEL }}",
+        "text": "🎯 TRADING SIGNAL GENERATED\n• Symbol: {{ $json.symbol }}\n• Signal: {{ $json.signal_type }} (Strength: {{ ($json.signal_strength * 100).toFixed(1) }}%)\n• Target Size: {{ $json.target_size }} shares\n• Limit Price: ${{ $json.limit_price.toFixed(2) }}\n• Confidence: {{ ($json.confidence_score * 100).toFixed(1) }}%\n• Strategies: {{ Object.keys($json.strategy_breakdown).filter(k => $json.strategy_breakdown[k].signal !== 0).join(', ') }}\n• Time: {{ $json.timestamp }}",
+        "additionalFields": {}
+      },
+      "id": "alert-trading-desk",
+      "name": "Alert Trading Desk on Strong Signals",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate signal analytics and performance metrics\nconst generateSignalAnalytics = (tradingSignals) => {\n  const analytics = {\n    analytics_timestamp: new Date().toISOString(),\n    signal_summary: {\n      total_signals: tradingSignals.length,\n      strong_signals: tradingSignals.filter(s => s.signal_strength >= 0.5).length,\n      long_signals: tradingSignals.filter(s => s.signal_type === 'LONG').length,\n      short_signals: tradingSignals.filter(s => s.signal_type === 'SHORT').length,\n      average_confidence: tradingSignals.reduce((sum, s) => sum + s.confidence_score, 0) / tradingSignals.length\n    },\n    strategy_performance: {},\n    symbol_distribution: {},\n    risk_metrics: {\n      max_signal_strength: Math.max(...tradingSignals.map(s => s.signal_strength)),\n      min_signal_strength: Math.min(...tradingSignals.map(s => s.signal_strength)),\n      avg_position_size: tradingSignals.reduce((sum, s) => sum + Math.abs(s.target_size), 0) / tradingSignals.length\n    }\n  };\n  \n  // Strategy distribution\n  tradingSignals.forEach(signal => {\n    Object.keys(signal.strategy_breakdown).forEach(strategy => {\n      if (signal.strategy_breakdown[strategy].signal !== 0) {\n        analytics.strategy_performance[strategy] = (analytics.strategy_performance[strategy] || 0) + 1;\n      }\n    });\n    \n    analytics.symbol_distribution[signal.symbol] = (analytics.symbol_distribution[signal.symbol] || 0) + 1;\n  });\n  \n  return analytics;\n};\n\nconst signals = items.map(item => item.json);\nconst analytics = generateSignalAnalytics(signals);\n\nreturn [{ json: analytics }];"
+      },
+      "id": "generate-signal-analytics",
+      "name": "Generate Signal Analytics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "Trading Signal Analytics - {{ $now }}",
+        "body": "Algorithmic Trading Signal Analytics:\n\nSignal Summary:\n• Total Signals: {{ $json.signal_summary.total_signals }}\n• Strong Signals: {{ $json.signal_summary.strong_signals }}\n• Long/Short Ratio: {{ $json.signal_summary.long_signals }}/{{ $json.signal_summary.short_signals }}\n• Average Confidence: {{ ($json.signal_summary.average_confidence * 100).toFixed(1) }}%\n\nStrategy Distribution:\n{{ Object.entries($json.strategy_performance).map(([strategy, count]) => `• ${strategy}: ${count} signals`).join('\\n') }}\n\nRisk Metrics:\n• Max Signal Strength: {{ ($json.risk_metrics.max_signal_strength * 100).toFixed(1) }}%\n• Avg Position Size: {{ $json.risk_metrics.avg_position_size.toFixed(0) }} shares\n\nGenerated: {{ $json.analytics_timestamp }}",
+        "to": "={{ $vars.TRADING_TEAM_EMAIL }}",
+        "additionalFields": {}
+      },
+      "id": "email-signal-analytics",
+      "name": "Email Signal Analytics Report",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        700
+      ]
+    }
+  ],
+  "connections": {
+    "Trading Hours Signal Trigger (1-min)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Real-Time Market Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Current Portfolio Positions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Real-Time Market Data": {
+      "main": [
+        [
+          {
+            "node": "Generate Multi-Strategy Trading Signals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Current Portfolio Positions": {
+      "main": [
+        [
+          {
+            "node": "Generate Multi-Strategy Trading Signals",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Generate Multi-Strategy Trading Signals": {
+      "main": [
+        [
+          {
+            "node": "Filter Strong Trading Signals",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Store Signals in Database",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Signal Analytics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Strong Trading Signals": {
+      "main": [
+        [
+          {
+            "node": "Publish Signals to Kafka (Execution)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alert Trading Desk on Strong Signals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Signal Analytics": {
+      "main": [
+        [
+          {
+            "node": "Email Signal Analytics Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,236 @@
+{
+  "name": "Counterparty Risk Monitoring System",
+  "version": 1,
+  "tags": ["counterparty", "credit-risk", "cva", "monitoring"],
+  "description": "Monitors counterparty exposures, calculates CVA, and alerts on deteriorating credit conditions",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            30
+          ],
+          "hour": [
+            "*"
+          ],
+          "minute": [
+            "*/30"
+          ]
+        }
+      },
+      "id": "cp-risk-trigger",
+      "name": "30-Minute Counterparty Risk Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    cp.counterparty_id,\n    cp.name,\n    cp.rating,\n    cp.cds_spread,\n    cp.risk_weight,\n    SUM(t.trade_value) as total_exposure\nFROM counterparties cp\nJOIN trades t ON cp.counterparty_id = t.counterparty_id\nWHERE t.status IN ('OPEN', 'PENDING')\nGROUP BY cp.counterparty_id, cp.name, cp.rating, cp.cds_spread, cp.risk_weight\nHAVING SUM(t.trade_value) > 0",
+        "additionalFields": {}
+      },
+      "id": "fetch-cp-exposures",
+      "name": "Fetch Counterparty Exposures",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Calculate Credit Value Adjustment (CVA) and other risk metrics\nconst calculateCVA = (exposures) => {\n  return exposures.map(cp => {\n    // Rating-based spread mapping\n    const ratingToSpread = {\n      'AAA': 0.0005, 'AA': 0.001, 'A': 0.002, \n      'BBB': 0.005, 'BB': 0.01, 'B': 0.02,\n      'CCC': 0.05, 'CC': 0.1, 'C': 0.15\n    };\n    \n    const baseSpread = ratingToSpread[cp.rating] || 0.03;\n    const cdsSpread = cp.cds_spread || baseSpread;\n    \n    // CVA calculation (simplified)\n    const cva = cp.total_exposure * cdsSpread * cp.risk_weight;\n    \n    // Probability of default based on rating\n    const ratingToPD = {\n      'AAA': 0.0001, 'AA': 0.0003, 'A': 0.0012,\n      'BBB': 0.003, 'BB': 0.01, 'B': 0.03,\n      'CCC': 0.08, 'CC': 0.2, 'C': 0.4\n    };\n    \n    const probabilityOfDefault = ratingToPD[cp.rating] || 0.05;\n    \n    return {\n      counterparty_id: cp.counterparty_id,\n      name: cp.name,\n      rating: cp.rating,\n      total_exposure: cp.total_exposure,\n      cds_spread: cdsSpread,\n      cva: cva,\n      probability_of_default: probabilityOfDefault,\n      risk_rating: cva > 1000000 ? 'HIGH' : cva > 500000 ? 'MEDIUM' : 'LOW',\n      calculation_timestamp: new Date().toISOString()\n    };\n  });\n};\n\nconst cvaCalculations = calculateCVA(items.map(item => item.json));\nreturn cvaCalculations.map(calc => ({ json: calc }));"
+      },
+      "id": "calculate-cva",
+      "name": "Calculate CVA and Credit Risk Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-high-cva",
+              "leftValue": "={{ $json.cva }}",
+              "rightValue": 1000000,
+              "operator": {
+                "type": "number",
+                "operation": "greaterThan"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-cva-threshold",
+      "name": "Check High CVA Threshold",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $vars.SLACK_RISK_CHANNEL }}",
+        "text": "🔴 HIGH COUNTERPARTY RISK ALERT\n• Counterparty: {{ $json.name }}\n• Rating: {{ $json.rating }}\n• Total Exposure: ${{ $json.total_exposure.toLocaleString() }}\n• CVA: ${{ $json.cva.toLocaleString() }}\n• Probability of Default: {{ ($json.probability_of_default * 100).toFixed(2) }}%\n• Time: {{ $json.calculation_timestamp }}\n• Action Required: Review counterparty limits",
+        "additionalFields": {}
+      },
+      "id": "send-cp-risk-alert",
+      "name": "Send Counterparty Risk Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "table": "counterparty_risk_monitoring",
+        "columns": {
+          "counterparty_id": "={{ $json.counterparty_id }}",
+          "name": "={{ $json.name }}",
+          "rating": "={{ $json.rating }}",
+          "total_exposure": "={{ $json.total_exposure }}",
+          "cva": "={{ $json.cva }}",
+          "probability_of_default": "={{ $json.probability_of_default }}",
+          "risk_rating": "={{ $json.risk_rating }}",
+          "last_updated": "={{ $json.calculation_timestamp }}",
+          "monitoring_period": "30_minutes"
+        },
+        "additionalFields": {
+          "updateKey": "counterparty_id"
+        }
+      },
+      "id": "store-cp-monitoring",
+      "name": "Store Counterparty Monitoring Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        900,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate daily counterparty risk summary\nconst summary = {\n  date: new Date().toISOString().split('T')[0],\n  total_counterparties_monitored: items.length,\n  high_risk_counterparties: items.filter(item => item.json.risk_rating === 'HIGH').length,\n  total_exposure: items.reduce((sum, item) => sum + item.json.total_exposure, 0),\n  total_cva: items.reduce((sum, item) => sum + item.json.cva, 0),\n  summary_timestamp: new Date().toISOString(),\n  top_exposures: items.sort((a, b) => b.json.total_exposure - a.json.total_exposure).slice(0, 5).map(item => ({\n    name: item.json.name,\n    exposure: item.json.total_exposure,\n    cva: item.json.cva,\n    rating: item.json.rating\n  }))\n};\nreturn [{ json: summary }];"
+      },
+      "id": "generate-cp-summary",
+      "name": "Generate Counterparty Risk Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "Counterparty Risk Dashboard - {{ $now }}",
+        "body": "Counterparty Risk Summary:\n• Total Counterparties Monitored: {{ $json.total_counterparties_monitored }}\n• High Risk Counterparties: {{ $json.high_risk_counterparties }}\n• Total Exposure: ${{ $json.total_exposure.toLocaleString() }}\n• Total CVA: ${{ $json.total_cva.toLocaleString() }}\n\nTop 5 Exposures:\n{{ $json.top_exposures.map(cp => `• ${cp.name}: $${cp.exposure.toLocaleString()} (CVA: $${cp.cva.toLocaleString()}, Rating: ${cp.rating})`).join('\\n') }}\n\nGenerated: {{ $json.summary_timestamp }}",
+        "to": "={{ $vars.RISK_TEAM_EMAIL }}",
+        "additionalFields": {}
+      },
+      "id": "email-cp-summary",
+      "name": "Email Counterparty Risk Summary",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        500
+      ]
+    }
+  ],
+  "connections": {
+    "30-Minute Counterparty Risk Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Counterparty Exposures",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Counterparty Exposures": {
+      "main": [
+        [
+          {
+            "node": "Calculate CVA and Credit Risk Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate CVA and Credit Risk Metrics": {
+      "main": [
+        [
+          {
+            "node": "Check High CVA Threshold",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Store Counterparty Monitoring Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Counterparty Risk Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check High CVA Threshold": {
+      "main": [
+        [
+          {
+            "node": "Send Counterparty Risk Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Counterparty Risk Summary": {
+      "main": [
+        [
+          {
+            "node": "Email Counterparty Risk Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

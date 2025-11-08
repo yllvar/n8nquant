@@ -1,0 +1,274 @@
+{
+  "name": "Margin Call Processing System",
+  "version": 1,
+  "tags": ["margin", "liquidation", "risk", "collateral"],
+  "description": "Automates margin call processing, liquidation prioritization, and collateral management",
+  "nodes": [
+    {
+      "parameters": {
+        "events": [
+          "margin-call"
+        ],
+        "path": "margin-call-webhook",
+        "options": {
+          "responseMode": "lastNode"
+        }
+      },
+      "id": "margin-call-webhook",
+      "name": "Margin Call Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ],
+      "webhookId": "margin-call-processor"
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    a.account_id,\n    a.account_number,\n    a.client_name,\n    a.margin_requirement,\n    a.available_liquidity,\n    a.cash_balance,\n    a.collateral_value,\n    SUM(p.quantity * md.price) as position_value\nFROM accounts a\nLEFT JOIN positions p ON a.account_id = p.account_id\nLEFT JOIN market_data md ON p.symbol = md.symbol\nWHERE a.account_id = '{{ $json.account_id }}'\nGROUP BY a.account_id, a.account_number, a.client_name, a.margin_requirement, a.available_liquidity, a.cash_balance, a.collateral_value",
+        "additionalFields": {}
+      },
+      "id": "fetch-account-status",
+      "name": "Fetch Account Status and Positions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Calculate liquidation requirements and prioritize assets\nconst calculateLiquidation = (accountData) => {\n  const account = accountData[0].json;\n  const shortfall = account.margin_requirement - (account.available_liquidity + account.cash_balance + account.collateral_value);\n  \n  if (shortfall <= 0) {\n    return {\n      account_id: account.account_id,\n      margin_call_status: 'RESOLVED',\n      shortfall: 0,\n      liquidation_required: false,\n      calculation_timestamp: new Date().toISOString()\n    };\n  }\n  \n  // Fetch detailed positions for liquidation prioritization\n  // This would typically come from another database query\n  const positions = []; // In a real implementation, this would be fetched from the database\n  \n  // Prioritize liquidation based on liquidity, volatility, and other factors\n  const liquidationTargets = positions\n    .filter(pos => pos.quantity > 0)\n    .sort((a, b) => {\n      // Prioritize by liquidity score (higher liquidity assets first)\n      // Then by volatility (lower volatility first)\n      return (b.liquidity_score - a.liquidity_score) || (a.volatility - b.volatility);\n    });\n  \n  // Calculate liquidation targets\n  const targets = [];\n  let remainingShortfall = shortfall;\n  \n  for (const position of liquidationTargets) {\n    if (remainingShortfall <= 0) break;\n    \n    const marketValue = position.quantity * position.current_price;\n    const liquidateAmount = Math.min(remainingShortfall, marketValue);\n    const liquidateQuantity = liquidateAmount / position.current_price;\n    \n    targets.push({\n      symbol: position.symbol,\n      quantity_to_liquidate: liquidateQuantity,\n      estimated_proceeds: liquidateAmount,\n      liquidation_priority: position.liquidity_score\n    });\n    \n    remainingShortfall -= liquidateAmount;\n  }\n  \n  return {\n    account_id: account.account_id,\n    account_number: account.account_number,\n    client_name: account.client_name,\n    margin_requirement: account.margin_requirement,\n    available_liquidity: account.available_liquidity,\n    shortfall: shortfall,\n    liquidation_required: true,\n    liquidation_targets: targets,\n    calculation_timestamp: new Date().toISOString()\n  };\n};\n\nconst liquidationPlan = calculateLiquidation(items);\nreturn [{ json: liquidationPlan }];"
+      },
+      "id": "calculate-liquidation-plan",
+      "name": "Calculate Liquidation Plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-liquidation-required",
+              "leftValue": "={{ $json.liquidation_required }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "isTrue"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-liquidation-needed",
+      "name": "Check Liquidation Needed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.TRADING_API_URL }}/orders",
+        "method": "POST",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $vars.TRADING_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "body": {
+          "symbol": "={{ $json.liquidation_targets[0].symbol }}",
+          "side": "SELL",
+          "quantity": "={{ $json.liquidation_targets[0].quantity_to_liquidate }}",
+          "type": "MARKET",
+          "time_in_force": "IOC",
+          "account_id": "={{ $json.account_id }}",
+          "order_tag": "MARGIN_LIQUIDATION_{{ $json.calculation_timestamp }}"
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "execute-liquidation-order",
+      "name": "Execute Liquidation Order",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "table": "accounts",
+        "columns": {
+          "margin_call_status": "RESOLVED",
+          "last_liquidation_date": "={{ new Date().toISOString() }}",
+          "margin_call_resolved_at": "={{ new Date().toISOString() }}"
+        },
+        "additionalFields": {
+          "where": {
+            "conditions": [
+              {
+                "column": "account_id",
+                "value": "={{ $json.account_id }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "update-account-status",
+      "name": "Update Account Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $vars.SLACK_TREASURY_CHANNEL }}",
+        "text": "💰 MARGIN CALL PROCESSED\n• Account: {{ $json.account_number }}\n• Client: {{ $json.client_name }}\n• Shortfall: ${{ $json.shortfall.toLocaleString() }}\n• Liquidated: {{ $json.liquidation_targets[0].symbol }} ({{ $json.liquidation_targets[0].quantity_to_liquidate }} shares)\n• Time: {{ $json.calculation_timestamp }}\n• Status: RESOLVED",
+        "additionalFields": {}
+      },
+      "id": "send-liquidation-alert",
+      "name": "Send Liquidation Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "margin_call_logs",
+        "columns": {
+          "account_id": "={{ $json.account_id }}",
+          "margin_requirement": "={{ $json.margin_requirement }}",
+          "available_liquidity": "={{ $json.available_liquidity }}",
+          "shortfall": "={{ $json.shortfall }}",
+          "liquidation_targets": "={{ JSON.stringify($json.liquidation_targets) }}",
+          "status": "PROCESSED",
+          "processed_at": "={{ $json.calculation_timestamp }}"
+        },
+        "additionalFields": {}
+      },
+      "id": "log-margin-call",
+      "name": "Log Margin Call Processing",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        500
+      ]
+    }
+  ],
+  "connections": {
+    "Margin Call Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Account Status and Positions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Account Status and Positions": {
+      "main": [
+        [
+          {
+            "node": "Calculate Liquidation Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Liquidation Plan": {
+      "main": [
+        [
+          {
+            "node": "Check Liquidation Needed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Liquidation Needed": {
+      "main": [
+        [
+          {
+            "node": "Execute Liquidation Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Liquidation Order": {
+      "main": [
+        [
+          {
+            "node": "Update Account Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Margin Call Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Account Status": {
+      "main": [
+        [
+          {
+            "node": "Send Liquidation Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,264 @@
+{
+  "name": "Real-time P&L Calculation Engine",
+  "version": 1,
+  "tags": ["pnl", "real-time", "calculation", "position", "valuation"],
+  "description": "Real-time P&L calculation engine that processes market price updates and calculates position valuations",
+  "nodes": [
+    {
+      "parameters": {
+        "events": [
+          "price-update"
+        ],
+        "path": "price-update-webhook",
+        "options": {
+          "responseMode": "lastNode"
+        }
+      },
+      "id": "price-update-webhook",
+      "name": "Market Price Update Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ],
+      "webhookId": "real-time-pnl-calculator"
+    },
+    {
+      "parameters": {
+        "sql": "SELECT \n    position_id,\n    symbol,\n    quantity,\n    average_cost,\n    portfolio_id,\n    account_id,\n    entry_date,\n    position_type\nFROM positions \nWHERE symbol = '{{ $json.symbol }}'\nAND quantity != 0\nAND active = true",
+        "additionalFields": {}
+      },
+      "id": "fetch-positions",
+      "name": "Fetch Positions for Symbol",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Calculate real-time P&L for positions\nconst calculatePnL = (positions, marketData) => {\n  const currentPrice = marketData.price;\n  const currentTime = marketData.timestamp || new Date().toISOString();\n  \n  return positions.map(position => {\n    const marketValue = position.quantity * currentPrice;\n    const costBasis = position.quantity * position.average_cost;\n    const unrealizedPnL = marketValue - costBasis;\n    const realizedPnL = 0; // Would come from closed trades\n    const totalPnL = unrealizedPnL + realizedPnL;\n    \n    // Calculate P&L metrics\n    const returnPercentage = (unrealizedPnL / Math.abs(costBasis)) * 100;\n    const dailyPnL = calculateDailyPnL(position, currentPrice);\n    \n    return {\n      position_id: position.position_id,\n      symbol: position.symbol,\n      quantity: position.quantity,\n      average_cost: position.average_cost,\n      current_price: currentPrice,\n      market_value: marketValue,\n      cost_basis: costBasis,\n      unrealized_pnl: unrealizedPnL,\n      realized_pnl: realizedPnL,\n      total_pnl: totalPnL,\n      return_percentage: returnPercentage,\n      daily_pnl: dailyPnL,\n      calculation_timestamp: currentTime,\n      portfolio_id: position.portfolio_id,\n      account_id: position.account_id\n    };\n  });\n};\n\n// Helper function to calculate daily P&L\nconst calculateDailyPnL = (position, currentPrice) => {\n  // This would typically use yesterday's closing price\n  const yesterdayPrice = position.average_cost; // Simplified for example\n  return (currentPrice - yesterdayPrice) * position.quantity;\n};\n\nconst positions = items[0].json;\nconst marketData = $json;\nconst pnlCalculations = calculatePnL(positions, marketData);\nreturn pnlCalculations.map(calc => ({ json: calc }));"
+      },
+      "id": "calculate-pnl",
+      "name": "Calculate Real-time P&L",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "table": "pnl_calculations",
+        "columns": {
+          "position_id": "={{ $json.position_id }}",
+          "symbol": "={{ $json.symbol }}",
+          "quantity": "={{ $json.quantity }}",
+          "current_price": "={{ $json.current_price }}",
+          "market_value": "={{ $json.market_value }}",
+          "cost_basis": "={{ $json.cost_basis }}",
+          "unrealized_pnl": "={{ $json.unrealized_pnl }}",
+          "realized_pnl": "={{ $json.realized_pnl }}",
+          "total_pnl": "={{ $json.total_pnl }}",
+          "return_percentage": "={{ $json.return_percentage }}",
+          "daily_pnl": "={{ $json.daily_pnl }}",
+          "calculation_timestamp": "={{ $json.calculation_timestamp }}",
+          "portfolio_id": "={{ $json.portfolio_id }}",
+          "account_id": "={{ $json.account_id }}"
+        },
+        "additionalFields": {
+          "updateKey": "position_id"
+        }
+      },
+      "id": "store-pnl-data",
+      "name": "Store P&L Calculations",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "topic": "pnl-updates",
+        "message": "={{ JSON.stringify($json) }}",
+        "additionalFields": {}
+      },
+      "id": "publish-pnl-update",
+      "name": "Publish P&L Update to Queue",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-large-pnl-movement",
+              "leftValue": "={{ Math.abs($json.unrealized_pnl) }}",
+              "rightValue": 1000000,
+              "operator": {
+                "type": "number",
+                "operation": "greaterThan"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-pnl-threshold",
+      "name": "Check Large P&L Movements",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $vars.SLACK_RISK_CHANNEL }}",
+        "text": "📊 LARGE P&L MOVEMENT ALERT\n• Position: {{ $json.symbol }} ({{ $json.quantity }} shares)\n• Current Price: ${{ $json.current_price }}\n• Unrealized P&L: ${{ $json.unrealized_pnl.toLocaleString() }}\n• Return: {{ $json.return_percentage.toFixed(2) }}%\n• Portfolio: {{ $json.portfolio_id }}\n• Time: {{ $json.calculation_timestamp }}",
+        "additionalFields": {}
+      },
+      "id": "send-pnl-alert",
+      "name": "Send Large P&L Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Aggregate portfolio-level P&L\nconst aggregatePortfolioPnL = (pnlData) => {\n  const portfolioGroups = {};\n  pnlData.forEach(item => {\n    if (!portfolioGroups[item.json.portfolio_id]) {\n      portfolioGroups[item.json.portfolio_id] = {\n        portfolio_id: item.json.portfolio_id,\n        total_unrealized_pnl: 0,\n        total_realized_pnl: 0,\n        total_positions: 0,\n        positions: []\n      };\n    }\n    portfolioGroups[item.json.portfolio_id].total_unrealized_pnl += item.json.unrealized_pnl;\n    portfolioGroups[item.json.portfolio_id].total_realized_pnl += item.json.realized_pnl;\n    portfolioGroups[item.json.portfolio_id].total_positions++;\n    portfolioGroups[item.json.portfolio_id].positions.push(item.json);\n  });\n  \n  return Object.values(portfolioGroups).map(portfolio => ({\n    portfolio_id: portfolio.portfolio_id,\n    total_unrealized_pnl: portfolio.total_unrealized_pnl,\n    total_realized_pnl: portfolio.total_realized_pnl,\n    total_pnl: portfolio.total_unrealized_pnl + portfolio.total_realized_pnl,\n    total_positions: portfolio.total_positions,\n    calculation_timestamp: new Date().toISOString(),\n    top_moving_positions: portfolio.positions.sort((a, b) => Math.abs(b.unrealized_pnl) - Math.abs(a.unrealized_pnl)).slice(0, 3)\n  }));\n};\n\nconst aggregatedPnL = aggregatePortfolioPnL(items);\nreturn aggregatedPnL.map(portfolio => ({ json: portfolio }));"
+      },
+      "id": "aggregate-portfolio-pnl",
+      "name": "Aggregate Portfolio-Level P&L",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "subject": "Real-time P&L Dashboard - {{ $now }}",
+        "body": "Portfolio P&L Summary:\n{{ $json.map(portfolio => `\n${portfolio.portfolio_id}:\n• Total Unrealized P&L: $${portfolio.total_unrealized_pnl.toLocaleString()}\n• Total Realized P&L: $${portfolio.total_realized_pnl.toLocaleString()}\n• Total Positions: ${portfolio.total_positions}\n• Top Moving Positions: ${portfolio.top_moving_positions.map(pos => `${pos.symbol}: $${pos.unrealized_pnl.toLocaleString()}`).join(', ')}\n`).join('\\n') }}\n\nGenerated: {{ $json[0].calculation_timestamp }}",
+        "to": "={{ $vars.TRADING_TEAM_EMAIL }}",
+        "additionalFields": {}
+      },
+      "id": "email-pnl-summary",
+      "name": "Email P&L Summary",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Market Price Update Webhook": {
+      "main": [
+        [
+          {
+            "node": "Fetch Positions for Symbol",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Positions for Symbol": {
+      "main": [
+        [
+          {
+            "node": "Calculate Real-time P&L",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Real-time P&L": {
+      "main": [
+        [
+          {
+            "node": "Store P&L Calculations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store P&L Calculations": {
+      "main": [
+        [
+          {
+            "node": "Publish P&L Update to Queue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Large P&L Movements",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Aggregate Portfolio-Level P&L",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Large P&L Movements": {
+      "main": [
+        [
+          {
+            "node": "Send Large P&L Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Portfolio-Level P&L": {
+      "main": [
+        [
+          {
+            "node": "Email P&L Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

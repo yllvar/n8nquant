@@ -1,0 +1,273 @@
+{
+  "name": "Research Data ETL Pipeline",
+  "version": 1,
+  "tags": ["research", "data", "etl", "sentiment", "news"],
+  "description": "ETL pipeline for financial research data including news, sentiment, and alternative data sources",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            60
+          ],
+          "hour": [
+            "*"
+          ],
+          "minute": [
+            "*/60"
+          ]
+        }
+      },
+      "id": "research-data-trigger",
+      "name": "Hourly Research Data Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.NEWS_API_URL }}/v2/everything",
+        "method": "GET",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpQueryAuth",
+        "sendHeaders": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "apiKey",
+              "value": "={{ $vars.NEWS_API_KEY }}"
+            },
+            {
+              "name": "q",
+              "value": "finance OR stock OR market OR trading"
+            },
+            {
+              "name": "language",
+              "value": "en"
+            },
+            {
+              "name": "sortBy",
+              "value": "publishedAt"
+            },
+            {
+              "name": "pageSize",
+              "value": "100"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "fetch-financial-news",
+      "name": "Fetch Financial News from API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process news articles and calculate sentiment\nconst processNews = (articles) => {\n  return articles.map(article => {\n    // Simple sentiment analysis using keyword scoring\n    const positiveKeywords = ['gains', 'rise', 'up', 'positive', 'bullish', 'buy', 'strong', 'growth', 'profit'];\n    const negativeKeywords = ['loss', 'fall', 'down', 'negative', 'bearish', 'sell', 'weak', 'decline', 'losses'];\n    \n    const title = article.title.toLowerCase();\n    const description = (article.description || '').toLowerCase();\n    const content = (article.content || '').toLowerCase();\n    \n    let positiveScore = 0;\n    let negativeScore = 0;\n    \n    positiveKeywords.forEach(keyword => {\n      if (title.includes(keyword) || description.includes(keyword) || content.includes(keyword)) {\n        positiveScore++;\n      }\n    });\n    \n    negativeKeywords.forEach(keyword => {\n      if (title.includes(keyword) || description.includes(keyword) || content.includes(keyword)) {\n        negativeScore++;\n      }\n    });\n    \n    const sentiment = (positiveScore - negativeScore) / (positiveScore + negativeScore + 1);\n    \n    // Extract relevant symbols from content\n    const symbolPattern = /\\b[A-Z]{2,5}\\b/g;\n    const symbols = [...new Set((title + ' ' + description + ' ' + content).match(symbolPattern) || [])];\n    \n    return {\n      article_id: article.id || generateId(),\n      title: article.title,\n      description: article.description,\n      content: article.content,\n      published_at: article.publishedAt,\n      source: article.source.name,\n      sentiment_score: sentiment,\n      symbols: symbols,\n      relevance_score: calculateRelevance(article),\n      processed_at: new Date().toISOString()\n    };\n  });\n};\n\nconst generateId = () => Math.random().toString(36).substr(2, 9);\n\nconst calculateRelevance = (article) => {\n  // Calculate relevance based on various factors\n  const titleLength = article.title.length;\n  const hasFinancialTerms = /financial|earnings|revenue|profit|market|trading/.test(article.title.toLowerCase());\n  const sourceAuthority = article.source.name.includes('Bloomberg') || article.source.name.includes('Reuters') ? 1.2 : 1.0;\n  \n  return Math.min(1, (titleLength / 100) * (hasFinancialTerms ? 1.5 : 1.0) * sourceAuthority);\n};\n\nconst processedArticles = processNews(items[0].json.articles || []);\nreturn processedArticles.map(article => ({ json: article }));"
+      },
+      "id": "process-news-sentiment",
+      "name": "Process News and Calculate Sentiment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "research_data",
+        "columns": {
+          "article_id": "={{ $json.article_id }}",
+          "title": "={{ $json.title }}",
+          "description": "={{ $json.description }}",
+          "sentiment_score": "={{ $json.sentiment_score }}",
+          "symbols": "={{ JSON.stringify($json.symbols) }}",
+          "relevance_score": "={{ $json.relevance_score }}",
+          "source": "={{ $json.source }}",
+          "published_at": "={{ $json.published_at }}",
+          "processed_at": "={{ $json.processed_at }}",
+          "data_type": "news"
+        },
+        "additionalFields": {}
+      },
+      "id": "store-research-data",
+      "name": "Store Processed Research Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "topic": "research-updates",
+        "message": "={{ JSON.stringify($json) }}",
+        "additionalFields": {}
+      },
+      "id": "publish-research-data",
+      "name": "Publish Research Data to Queue",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion:": 1,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-high-sentiment",
+              "leftValue": "={{ Math.abs($json.sentiment_score) }}",
+              "rightValue": 0.5,
+              "operator": {
+                "type": "number",
+                "operation": "greaterThan"
+              }
+            },
+            {
+              "id": "check-relevance",
+              "leftValue": "={{ $json.relevance_score }}",
+              "rightValue": 0.7,
+              "operator": {
+                "type": "number",
+                "operation": "greaterThan"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-significant-news",
+      "name": "Check for Significant News Events",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $vars.SLACK_RESEARCH_CHANNEL }}",
+        "text": "📢 SIGNIFICANT NEWS ALERT\n• Title: {{ $json.title }}\n• Sentiment: {{ $json.sentiment_score > 0 ? 'POSITIVE' : 'NEGATIVE' }} ({{ $json.sentiment_score.toFixed(2) }})\n• Symbols: {{ $json.symbols.join(', ') }}\n• Source: {{ $json.source }}\n• Time: {{ $json.published_at }}\n• Relevance: {{ ($json.relevance_score * 100).toFixed(1) }}%",
+        "additionalFields": {}
+      },
+      "id": "send-news-alert",
+      "name": "Send Significant News Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Calculate research pipeline metrics\nconst metrics = {\n  total_articles_processed: items.length,\n  positive_articles: items.filter(item => item.json.sentiment_score > 0.1).length,\n  negative_articles: items.filter(item => item.json.sentiment_score < -0.1).length,\n  average_sentiment: items.reduce((sum, item) => sum + item.json.sentiment_score, 0) / items.length,\n  processing_timestamp: new Date().toISOString(),\n  unique_symbols_mentioned: [...new Set(items.flatMap(item => item.json.symbols))].length\n};\nreturn [{ json: metrics }];"
+      },
+      "id": "calculate-pipeline-metrics",
+      "name": "Calculate Research Pipeline Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Hourly Research Data Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Financial News from API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Financial News from API": {
+      "main": [
+        [
+          {
+            "node": "Process News and Calculate Sentiment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process News and Calculate Sentiment": {
+      "main": [
+        [
+          {
+            "node": "Store Processed Research Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Processed Research Data": {
+      "main": [
+        [
+          {
+            "node": "Publish Research Data to Queue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check for Significant News Events",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Calculate Research Pipeline Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check for Significant News Events": {
+      "main": [
+        [
+          {
+            "node": "Send Significant News Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
